@@ -56,27 +56,57 @@ def main():
        
         page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
 
-        
+        # Better scrolling with specific selector targeting the results feed
+        results_selector = '[role="feed"]'
         previously_counted = 0
-        while True:
-            page.mouse.wheel(0, 10000)
-            # page.wait_for_timeout(3000)
-            page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]')
-
-
-            if (page.locator( '//a[contains(@href, "https://www.google.com/maps/place")]').count() >= total):
-                listings = page.locator( '//a[contains(@href, "https://www.google.com/maps/place")]').all()[:total]
-                listings = [listing.locator("xpath=..") for listing in listings]
-                print(f"Total Found: {len(listings)}")
+        max_attempts = 3  # Prevent infinite loops
+        attempts = 0
+        
+        print("Starting to scroll for results...")
+        
+        while attempts < max_attempts:
+            # Get current result count
+            current_count = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count()
+            print(f"Currently Found: {current_count}")
+            
+            if current_count >= total:
+                print(f"Found {current_count} results, which meets the target of {total}")
                 break
-            else: #The loop should not run infinitely
-                if (page.locator( '//a[contains(@href, "https://www.google.com/maps/place")]' ).count() == previously_counted ):
-                    listings = page.locator( '//a[contains(@href, "https://www.google.com/maps/place")]' ).all()
-                    print(f"Arrived at all available\nTotal Found: {len(listings)}")
-                    break
-                else:
-                    previously_counted = page.locator( '//a[contains(@href, "https://www.google.com/maps/place")]' ).count()
-                    print( f"Currently Found: ", page.locator( '//a[contains(@href, "https://www.google.com/maps/place")]' ).count(), )
+                
+            # Check if we're still finding new results
+            if current_count == previously_counted:
+                attempts += 1
+                print(f"No new results found. Attempt {attempts}/{max_attempts}")
+            else:
+                attempts = 0  # Reset attempts if we find new results
+                previously_counted = current_count
+            
+            # Scroll the results container directly
+            if page.locator(results_selector).count() > 0:
+                # JavaScript scrolling is more reliable than mouse wheel
+                page.evaluate("""selector => {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        element.scrollTop = element.scrollHeight;
+                    }
+                }""", results_selector)
+            else:
+                # Fallback to the old method
+                page.mouse.wheel(0, 10000)
+                
+            # Wait for network to become quieter, but don't fail if it doesn't
+            try:
+                page.wait_for_load_state("networkidle", timeout=4000)
+            except Exception as e:
+                print(f"Network still active after scrolling, continuing anyway: {str(e)}")
+            
+            # Always ensure a minimum wait time for results to load
+            page.wait_for_timeout(2000)
+        
+        # Get the final list of results
+        listings = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').all()[:total]
+        listings = [listing.locator("xpath=..") for listing in listings]
+        print(f"Total Found: {len(listings)}")
 
        
         # scraping
