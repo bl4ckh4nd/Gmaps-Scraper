@@ -59,12 +59,12 @@ def main():
         # Better scrolling with specific selector targeting the results feed
         results_selector = '[role="feed"]'
         previously_counted = 0
-        max_attempts = 3  # Prevent infinite loops
-        attempts = 0
+        max_attempts = 5  # Slightly more attempts before giving up
+        static_count_attempts = 0  # Track consecutive attempts with no new results
         
         print("Starting to scroll for results...")
         
-        while attempts < max_attempts:
+        while static_count_attempts < max_attempts:
             # Get current result count
             current_count = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count()
             print(f"Currently Found: {current_count}")
@@ -75,33 +75,29 @@ def main():
                 
             # Check if we're still finding new results
             if current_count == previously_counted:
-                attempts += 1
-                print(f"No new results found. Attempt {attempts}/{max_attempts}")
+                static_count_attempts += 1
+                print(f"No new results found. Attempt {static_count_attempts}/{max_attempts}")
             else:
-                attempts = 0  # Reset attempts if we find new results
+                static_count_attempts = 0  # Reset attempts if we find new results
                 previously_counted = current_count
             
-            # Scroll the results container directly
+            # Progressive scrolling - scroll further down each time
             if page.locator(results_selector).count() > 0:
-                # JavaScript scrolling is more reliable than mouse wheel
-                page.evaluate("""selector => {
-                    const element = document.querySelector(selector);
+                # More advanced scrolling that moves further down each time
+                # Fixed syntax for evaluate function call
+                page.evaluate("""(args) => {
+                    const element = document.querySelector(args.selector);
                     if (element) {
-                        element.scrollTop = element.scrollHeight;
+                        // Scroll progressively further each time
+                        element.scrollTop = element.scrollHeight * 0.5 * args.multiplier;
                     }
-                }""", results_selector)
+                }""", {"selector": results_selector, "multiplier": static_count_attempts + 1})
             else:
-                # Fallback to the old method
-                page.mouse.wheel(0, 10000)
-                
-            # Wait for network to become quieter, but don't fail if it doesn't
-            try:
-                page.wait_for_load_state("networkidle", timeout=4000)
-            except Exception as e:
-                print(f"Network still active after scrolling, continuing anyway: {str(e)}")
+                # Fallback to the old method with increased scroll amount
+                page.mouse.wheel(0, 15000)
             
-            # Always ensure a minimum wait time for results to load
-            page.wait_for_timeout(2000)
+            # Simpler approach - don't rely on networkidle, just wait a fixed time
+            page.wait_for_timeout(3000)
         
         # Get the final list of results
         listings = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').all()[:total]
