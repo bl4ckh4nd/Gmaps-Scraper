@@ -249,8 +249,9 @@ def main():
                 # Your existing scroll logic
                 results_selector = '[role="feed"]'
                 previously_counted = 0
-                max_attempts = 5
+                max_attempts = 3  # Reduced from 5
                 static_count_attempts = 0
+                scroll_interval = 1500  # Reduced from 3000ms
                 
                 print("Starting to scroll for results...")
                 
@@ -258,8 +259,9 @@ def main():
                     current_count = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count()
                     print(f"Currently Found: {current_count}")
                     
-                    if current_count >= min(120, total - results_count):
-                        print(f"Found {current_count} results in this grid cell")
+                    # Stop earlier if we find enough results
+                    if current_count >= min(80, total - results_count):  # Reduced from 120
+                        print(f"Found sufficient results ({current_count}) in this grid cell")
                         break
                         
                     if current_count == previously_counted:
@@ -269,17 +271,26 @@ def main():
                         static_count_attempts = 0
                         previously_counted = current_count
                     
+                    # More aggressive scrolling
                     if page.locator(results_selector).count() > 0:
-                        page.evaluate("""(args) => {
-                            const element = document.querySelector(args.selector);
-                            if (element) {
-                                element.scrollTop = element.scrollHeight * 0.5 * args.multiplier;
-                            }
-                        }""", {"selector": results_selector, "multiplier": static_count_attempts + 1})
+                        try:
+                            page.evaluate("""(selector) => {
+                                const element = document.querySelector(selector);
+                                if (element) {
+                                    element.scrollTop = element.scrollHeight;
+                                }
+                            }""", results_selector)
+                        except:
+                            page.mouse.wheel(0, 20000)  # Increased scroll distance
                     else:
-                        page.mouse.wheel(0, 15000)
+                        page.mouse.wheel(0, 20000)  # Increased scroll distance
                     
-                    page.wait_for_timeout(3000)
+                    page.wait_for_timeout(scroll_interval)
+                    
+                    # Break early if we've scrolled enough
+                    if current_count > 40 and static_count_attempts >= 2:
+                        print("Breaking early - sufficient results found")
+                        break
                 
                 # Improved listing collection with detailed logging
                 try:
