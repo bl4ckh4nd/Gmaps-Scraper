@@ -1,1 +1,4 @@
 /venv
+*.csv
+*.json
+*.log
