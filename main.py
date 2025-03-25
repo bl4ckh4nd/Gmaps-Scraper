@@ -744,15 +744,26 @@ def main():
                             website_xpath = '//a[@data-item-id="authority"]//div[contains(@class, "fontBodyMedium")]'
                             phone_number_xpath = '//button[contains(@data-item-id, "phone:tel:")]//div[contains(@class, "fontBodyMedium")]'
                             reviews_count_xpath = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span//span//span[@aria-label]'
-                            reviews_average_xpath = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span[@aria-hidden and contains(text(), ",")]'
+                            # Updated selectors for review average
+                            reviews_average_selectors = [
+                                '//*[@id="QA0Szd"]/div/div/div[1]/div[2]/div/div[1]/div/div/div[2]/div/div[1]/div[2]/div/div[1]/div[2]/span[1]/span[1]',
+                                '//div[@class="F7nice"]//span[1]/span[1]',
+                                '//div[@class="fontBodyMedium dmRWX"]//span[@aria-hidden and contains(text(), ",")]'
+                            ]
+                            # Updated selectors for introduction
+                            intro_selectors = [
+                                '//*[@id="QA0Szd"]/div/div/div[1]/div[2]/div/div[1]/div/div/div[8]/button/div[3]/div/div[1]',
+                                '//div[@class="WeS02d fontBodyMedium"]//div[@class="PYvSYb"]',
+                                '//button//div[@class="WeS02d fontBodyMedium"]//div[@class="PYvSYb"]'
+                            ]
+                            place_type_xpath='//div[@class="LBgpqf"]//button[@class="DkEaL "]'
+                            intro_xpath='//div[@class="WeS02d fontBodyMedium"]//div[@class="PYvSYb "]'
                             info1='//div[@class="LTs0Rc"][1]'
                             info2='//div[@class="LTs0Rc"][2]'
                             info3='//div[@class="LTs0Rc"][3]'
+
                             opens_at_xpath='//button[contains(@data-item-id, "oh")]//div[contains(@class, "fontBodyMedium")]'
                             opens_at_xpath2='//div[@class="MkV9"]//span[@class="ZDu9vd"]//span[2]'
-                            place_type_xpath='//div[@class="LBgpqf"]//button[@class="DkEaL "]'
-                            intro_xpath='//div[@class="WeS02d fontBodyMedium"]//div[@class="PYvSYb "]'
-                            
                             # Reset temporary data for this listing
                             name = ""
                             address = ""
@@ -792,9 +803,22 @@ def main():
                                 temp = temp.replace('(','').replace(')','').replace(',','')
                                 try:
                                     review_count = int(temp)
-                                    # Extract all reviews (or up to 100 if there are too many)
+                                    # Extract review average using a more specific selector
+                                    rating_selector = '//span[@role="img" and contains(@class, "ceNzKf") and contains(@aria-label, "Sterne")]'
+                                    if page.locator(rating_selector).count() > 0:
+                                        raw_rating = page.locator(rating_selector).first.get_attribute('aria-label')
+                                        logger.info(f"Found raw rating: {raw_rating}")
+                                        if raw_rating:
+                                            # Extract numeric value from German rating text
+                                            matches = re.search(r'(\d+[.,]\d+|\d+)', raw_rating)
+                                            if matches:
+                                                review_average = float(matches.group(1).replace(',', '.'))
+                                                logger.info(f"Successfully extracted review average: {review_average}")
+                                    
+                                    # Now get review summary
                                     logger.info(f"Total reviews available: {review_count}")
                                     max_reviews_to_get = min(review_count, 100)  # Cap at 100 reviews per business
+                                    
                                     reviews = extract_reviews(page, name, address, place_id, 
                                                            total_reviews_count=review_count,
                                                            max_reviews=max_reviews_to_get)
@@ -803,14 +827,10 @@ def main():
                                 except ValueError:
                                     review_count = ""
                             
-                            if page.locator(reviews_average_xpath).count() > 0:
-                                temp = page.locator(reviews_average_xpath).inner_text()
-                                temp = temp.replace(' ','').replace(',','.')
-                                try:
-                                    review_average = float(temp)
-                                except:
-                                    review_average = ""
-                                    
+
+
+
+                            
                             # Process additional data for store info
                             # For info1
                             if page.locator(info1).count() > 0:
@@ -830,6 +850,7 @@ def main():
                                     store_shopping = "No"
                             else:
                                 store_shopping = "No"
+
 
                             # Apply similar pattern for info2 and info3
                             if page.locator(info2).count() > 0:
@@ -878,6 +899,7 @@ def main():
                                 opens = opens.replace("\u202f", "")
                                 opens_at = opens
                             
+
                             # After extracting all the business data, extract reviews
                             if results_count < total:  # Only extract reviews if we're still collecting results
                                 logger.info("Extracting reviews for this business...")
@@ -885,6 +907,7 @@ def main():
                                 if reviews:
                                     save_reviews_to_csv(reviews)
                             
+
                             # Create record and save to CSV
                             record = {
                                 'Place ID': place_id,
@@ -895,7 +918,7 @@ def main():
                                 'Address': address,
                                 'Maps URL': url,  # Add the Maps URL to the record
                                 'Review Count': review_count,
-                                'Average Review Count': review_average,
+                                'Average Review': review_average,  # Updated field name
                                 'Store Shopping': store_shopping,
                                 'In Store Pickup': in_store_pickup,
                                 'Delivery': store_delivery,
@@ -903,6 +926,16 @@ def main():
                                 'Opens At': opens_at
                             }
                             
+
+                            # Log all extracted data
+                            logger.info("Extracted Data Summary:")
+                            logger.info(f"Name: {name}")
+                            logger.info(f"Address: {address}")
+                            logger.info(f"Review Count: {review_count}")
+                            logger.info(f"Review Average: {review_average}")
+                            logger.info(f"Introduction: {introduction[:100]}...")
+                            
+
                             # Append to CSV immediately and only increment count if successful
                             if append_to_csv(record):
                                 results_count += 1
@@ -911,6 +944,7 @@ def main():
                             else:
                                 logger.info(f"Duplicate skipped. Still at {results_count}/{total} listings")
                             
+
                             # Increment processed count
                             processed_count += 1
                             
@@ -918,13 +952,19 @@ def main():
                             logger.error(f"Error processing URL {idx+1}: {e}")
                             error_count += 1
                     
+                    
+
                     # After processing all URLs for this grid cell, return to search for next cell
                     logger.info("Finished processing URLs for this grid cell")
                     
                 except Exception as e:
                     logger.error(f"Failed to collect listings: {e}")
                 
+                
+
                 # After processing all listings in a grid cell:
+
+
 
                 # Log cell processing summary 
                 logger.info(f"\n=== Grid Cell {cell_id} Summary ===")
@@ -932,6 +972,8 @@ def main():
                 logger.info(f"Processed: {processed_count}, Skipped: {skipped_count}, Errors: {error_count}")
                 logger.info(f"Current progress: {results_count}/{total} unique listings collected")
                 logger.info("=====================================\n")
+
+                
 
                 # Mark cell as completed
                 completed_cells.append(cell_id)
@@ -946,11 +988,15 @@ def main():
                 # Continue to next cell on error
                 continue
         
+        
+
         # Finalize the CSV (remove duplicates if any)
         try:
             df = pd.read_csv('result.csv')
             df = df.drop_duplicates(subset=['Names', 'Address'])
             
+            
+
             # Remove columns with only one unique value
             for column in df.columns:
                 if df[column].nunique() == 1:
@@ -964,15 +1010,20 @@ def main():
         
         browser.close()
                             
+
     # Final deduplication of the CSV - using BOTH Name and Address
     try:
         print("Performing final deduplication of results...")
         df = pd.read_csv('result.csv')
         original_count = len(df)
         
+        
+
         # Remove duplicates based on both name and address
         df = df.drop_duplicates(subset=['Names', 'Address'])
         
+        
+
         # Save the deduplicated data
         df.to_csv('result.csv', index=False)
         print(f"Removed {original_count - len(df)} duplicate entries. Final dataset contains {len(df)} unique listings.")
@@ -994,6 +1045,8 @@ if __name__ == "__main__":
     if args.bounds:
         bounds = tuple(map(float, args.bounds.split(',')))
     else:
+        
+
         # Default bounds - adjust these for your default area
         bounds = (43.6, -79.5, 43.9, -79.2)  # Default to Toronto area
     
