@@ -249,7 +249,7 @@ def main():
                 # Your existing scroll logic
                 results_selector = '[role="feed"]'
                 previously_counted = 0
-                max_attempts = 3  # Reduced from 5
+                max_attempts = 5  # Reduced from 5
                 static_count_attempts = 0
                 scroll_interval = 1500  # Reduced from 3000ms
                 
@@ -260,7 +260,7 @@ def main():
                     print(f"Currently Found: {current_count}")
                     
                     # Stop earlier if we find enough results
-                    if current_count >= min(80, total - results_count):  # Reduced from 120
+                    if current_count >= min(120, total - results_count):  # Increased from 100
                         print(f"Found sufficient results ({current_count}) in this grid cell")
                         break
                         
