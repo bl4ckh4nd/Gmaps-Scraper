@@ -7,6 +7,7 @@ import argparse
 import time
 import logging
 import datetime
+import re
 
 l1=[]
 l2=[]
@@ -139,6 +140,270 @@ def extract_place_id(url):
         return url
     except:
         return url
+
+def parse_star_rating(star_text):
+    """Extract numeric rating from star text like '5 Sterne'"""
+    if not star_text:
+        return 0
+    
+    # Extract the number from text like "5 Sterne" or "1 Stern"
+    match = re.search(r'(\d+)', star_text)
+    if match:
+        return int(match.group(1))
+    return 0
+
+def extract_reviews(page, business_name, business_address, max_reviews=10):
+    """Extract reviews for the current business listing"""
+    logger = logging.getLogger()
+    reviews = []
+    
+    try:
+        # First check if we need to click on reviews tab - using improved selectors based on the tab structure
+        # Try multiple selectors to improve robustness across different Google Maps versions and languages
+        reviews_tab_selectors = [
+            'xpath=//button[@role="tab" and contains(@aria-label, "Rezensionen")]',
+            'xpath=//button[@role="tab" and contains(@aria-label, "Reviews")]',
+            'xpath=//button[@role="tab"]//div[contains(text(), "Rezensionen")]/..',
+            'xpath=//button[@role="tab"]//div[contains(text(), "Reviews")]/..',
+            'xpath=//button[@role="tab" and @data-tab-index="1"]',  # Often the reviews tab is the second tab
+            'xpath=//button[@jsaction="pane.rating.moreReviews"]'   # Original selector as fallback
+        ]
+        
+        # Try each selector until we find a matching element
+        reviews_tab_clicked = False
+        for selector in reviews_tab_selectors:
+            if page.locator(selector).count() > 0:
+                logger.info(f"Found reviews tab with selector: {selector}")
+                try:
+                    page.locator(selector).click()
+                    page.wait_for_timeout(2000)  # Wait for reviews to load
+                    reviews_tab_clicked = True
+                    break
+                except Exception as e:
+                    logger.warning(f"Error clicking reviews tab with selector {selector}: {e}")
+        
+        if not reviews_tab_clicked:
+            logger.info("Could not find or click reviews tab, trying to continue with any available reviews")
+        
+        # Wait for review containers to appear
+        review_containers_selector = 'xpath=//div[@class="jftiEf fontBodyMedium "]'
+        try:
+            page.wait_for_selector(review_containers_selector, timeout=5000)
+        except:
+            logger.info("No reviews found for this location")
+            return reviews
+        
+        # Get initial review count
+        review_containers = page.locator(review_containers_selector).all()
+        logger.info(f"Found {len(review_containers)} initial reviews")
+        
+        # If we have reviews, try to load more by scrolling
+        if len(review_containers) > 0:
+            scroll_attempts = 0
+            previous_count = 0
+            
+            # Find the scrollable container - it's usually a div with role="feed"
+            feed_selectors = [
+                'div[role="feed"]',  # CSS selector
+                '.m6QErb',           # CSS selector for reviews container
+                '[class*="m6QErb"]'   # CSS selector with wildcard for class name
+            ]
+            
+            # Scroll the feed container to load more reviews
+            while len(review_containers) < max_reviews and scroll_attempts < 5:
+                # Try different scrolling methods
+                try:
+                    # Method 1: Use querySelector and JavaScript
+                    for selector in feed_selectors:
+                        try:
+                            page.evaluate(f"""
+                                const feed = document.querySelector('{selector}');
+                                if (feed) {{
+                                    feed.scrollTop = feed.scrollHeight;
+                                    return true;
+                                }}
+                                return false;
+                            """)
+                            break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error scrolling review feed with JS: {e}")
+                    
+                    # Method 2: Fallback to mouse wheel
+                    try:
+                        # Find a review element and scroll from there
+                        if page.locator(review_containers_selector).count() > 0:
+                            page.locator(review_containers_selector).first.scroll_into_view_if_needed()
+                            page.mouse.wheel(0, 2000)
+                        else:
+                            page.mouse.wheel(0, 2000)
+                    except Exception as e:
+                        logger.warning(f"Fallback scrolling also failed: {e}")
+                
+                page.wait_for_timeout(2000)  # Wait for more reviews to load
+                
+                # Check if we got more reviews
+                review_containers = page.locator(review_containers_selector).all()
+                logger.info(f"After scroll: {len(review_containers)} reviews")
+                
+                if len(review_containers) <= previous_count:
+                    scroll_attempts += 1
+                else:
+                    scroll_attempts = 0
+                
+                previous_count = len(review_containers)
+        
+        # Process all found reviews
+        for i, container in enumerate(review_containers):
+            if i >= max_reviews:
+                break
+                
+            try:
+                # Extract reviewer name - fixed selectors
+                name_selectors = [
+                    'xpath=.//div[contains(@class, "d4r55")]',
+                    'css=div.d4r55',
+                    '.d4r55'  # CSS shorthand
+                ]
+                
+                reviewer_name = ""
+                for selector in name_selectors:
+                    try:
+                        if container.locator(selector).count() > 0:
+                            reviewer_name = container.locator(selector).inner_text()
+                            break
+                    except Exception:
+                        continue
+                
+                # Extract review text - fixed selectors
+                text_selectors = [
+                    'xpath=.//div[@class="MyEned"]//span[@class="wiI7pd"]',
+                    'css=div.MyEned span.wiI7pd',
+                    '.wiI7pd'  # CSS shorthand
+                ]
+                
+                review_text = ""
+                for selector in text_selectors:
+                    try:
+                        if container.locator(selector).count() > 0:
+                            review_text = container.locator(selector).inner_text()
+                            break
+                    except Exception:
+                        continue
+                
+                # Extract star rating - fixed selectors
+                stars_selectors = [
+                    'xpath=.//span[@class="kvMYJc"]',
+                    'css=span.kvMYJc',
+                    '.kvMYJc'  # CSS shorthand
+                ]
+                
+                stars = 0
+                for selector in stars_selectors:
+                    try:
+                        if container.locator(selector).count() > 0:
+                            stars_text = container.locator(selector).get_attribute('aria-label')
+                            stars = parse_star_rating(stars_text)
+                            break
+                    except Exception:
+                        continue
+                
+                # Extract review date - fixed selectors
+                date_selectors = [
+                    'xpath=.//span[@class="rsqaWe"]',
+                    'css=span.rsqaWe',
+                    '.rsqaWe'  # CSS shorthand
+                ]
+                
+                date = ""
+                for selector in date_selectors:
+                    try:
+                        if container.locator(selector).count() > 0:
+                            date = container.locator(selector).inner_text()
+                            break
+                    except Exception:
+                        continue
+                
+                # Extract owner response - fixed selectors
+                response_selectors = [
+                    'xpath=.//div[@class="CDe7pd"]//div[@class="wiI7pd"]',
+                    'css=div.CDe7pd div.wiI7pd',
+                    'div.CDe7pd .wiI7pd'  # CSS shorthand
+                ]
+                
+                owner_response = ""
+                for selector in response_selectors:
+                    try:
+                        if container.locator(selector).count() > 0:
+                            owner_response = container.locator(selector).inner_text()
+                            break
+                    except Exception:
+                        continue
+                
+                # Create review object
+                review = {
+                    'business_name': business_name,
+                    'business_address': business_address,
+                    'reviewer_name': reviewer_name,
+                    'review_text': review_text,
+                    'rating': stars,
+                    'review_date': date,
+                    'owner_response': owner_response,
+                    'language': detect_language(review_text)
+                }
+                
+                reviews.append(review)
+                logger.debug(f"Extracted review {i+1}: {reviewer_name} - {stars} stars")
+                
+            except Exception as e:
+                logger.error(f"Error extracting review {i+1}: {e}")
+                continue
+        
+        logger.info(f"Successfully extracted {len(reviews)} reviews")
+        return reviews
+        
+    except Exception as e:
+        logger.error(f"Error in extract_reviews: {e}")
+        return reviews
+
+def detect_language(text):
+    """Simple language detection based on common words"""
+    if not text:
+        return "unknown"
+        
+    # Simple language detection based on common words
+    german_words = ['und', 'der', 'die', 'das', 'ist', 'sehr', 'gut', 'für', 'mit', 'von', 'nicht']
+    english_words = ['and', 'the', 'is', 'very', 'good', 'for', 'with', 'not', 'this', 'that']
+    
+    text_lower = text.lower()
+    words = re.findall(r'\b\w+\b', text_lower)
+    
+    german_count = sum(1 for word in words if word in german_words)
+    english_count = sum(1 for word in words if word in english_words)
+    
+    if german_count > english_count:
+        return "de"
+    elif english_count > 0:
+        return "en"
+    else:
+        return "unknown"
+
+def save_reviews_to_csv(reviews, filename='reviews.csv'):
+    """Save reviews to a CSV file"""
+    if not reviews:
+        return
+    
+    # Check if file exists to determine if header is needed
+    file_exists = os.path.isfile(filename)
+    
+    # Create DataFrame from reviews
+    df = pd.DataFrame(reviews)
+    
+    # Write to CSV, append if file exists
+    df.to_csv(filename, mode='a', header=not file_exists, index=False, encoding='utf-8-sig')
+    
+    print(f"Saved {len(reviews)} reviews to {filename}")
 
 # Set up logging configuration
 def setup_logging():
@@ -531,6 +796,13 @@ def main():
                                     opens = page.locator(opens_at_xpath).inner_text()
                                 opens = opens.replace("\u202f", "")
                                 opens_at = opens
+                            
+                            # After extracting all the business data, extract reviews
+                            if results_count < total:  # Only extract reviews if we're still collecting results
+                                logger.info("Extracting reviews for this business...")
+                                reviews = extract_reviews(page, name, address, max_reviews=10)
+                                if reviews:
+                                    save_reviews_to_csv(reviews)
                             
                             # Create record and save to CSV
                             record = {

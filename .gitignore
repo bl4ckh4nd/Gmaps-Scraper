@@ -2,3 +2,4 @@
 *.csv
 *.json
 *.log
+.~lock.reviews.csv#
