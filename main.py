@@ -198,10 +198,15 @@ def extract_reviews(page, business_name, business_address, place_id, total_revie
         initial_review_count = len(review_containers)
         logger.info(f"Found {initial_review_count} initial reviews")
         
-        # Determine how many reviews to get
-        target_reviews = total_reviews_count if total_reviews_count else 0
-        if max_reviews:
-            target_reviews = min(target_reviews, max_reviews) if target_reviews > 0 else max_reviews
+        # Determine how many reviews to get - fix NoneType comparison
+        if total_reviews_count and max_reviews:
+            target_reviews = min(total_reviews_count, max_reviews)
+        elif total_reviews_count:
+            target_reviews = total_reviews_count
+        elif max_reviews:
+            target_reviews = max_reviews
+        else:
+            target_reviews = 50  # Default value if no limits specified
         
         logger.info(f"Target reviews to extract: {target_reviews}")
         
@@ -313,112 +318,120 @@ def extract_reviews(page, business_name, business_address, place_id, total_revie
         review_count_to_process = min(len(review_containers), target_reviews) if target_reviews > 0 else len(review_containers)
         logger.info(f"Processing {review_count_to_process} reviews")
         
-        # Process all found reviews
-        for i, container in enumerate(review_containers):
-            if i >= review_count_to_process:
-                break
-                
-            try:
-                # Extract reviewer name - fixed selectors
-                name_selectors = [
-                    'xpath=.//div[contains(@class, "d4r55")]',
-                    'css=div.d4r55',
-                    '.d4r55'  # CSS shorthand
-                ]
-                
-                reviewer_name = ""
-                for selector in name_selectors:
-                    try:
-                        if container.locator(selector).count() > 0:
-                            reviewer_name = container.locator(selector).inner_text()
-                            break
-                    except Exception:
-                        continue
-                
-                # Extract review text - fixed selectors
-                text_selectors = [
-                    'xpath=.//div[@class="MyEned"]//span[@class="wiI7pd"]',
-                    'css=div.MyEned span.wiI7pd',
-                    '.wiI7pd'  # CSS shorthand
-                ]
-                
-                review_text = ""
-                for selector in text_selectors:
-                    try:
-                        if container.locator(selector).count() > 0:
-                            review_text = container.locator(selector).inner_text()
-                            break
-                    except Exception:
-                        continue
-                
-                # Extract star rating - fixed selectors
-                stars_selectors = [
-                    'xpath=.//span[@class="kvMYJc"]',
-                    'css=span.kvMYJc',
-                    '.kvMYJc'  # CSS shorthand
-                ]
-                
-                stars = 0
-                for selector in stars_selectors:
-                    try:
-                        if container.locator(selector).count() > 0:
-                            stars_text = container.locator(selector).get_attribute('aria-label')
-                            stars = parse_star_rating(stars_text)
-                            break
-                    except Exception:
-                        continue
-                
-                # Extract review date - fixed selectors
-                date_selectors = [
-                    'xpath=.//span[@class="rsqaWe"]',
-                    'css=span.rsqaWe',
-                    '.rsqaWe'  # CSS shorthand
-                ]
-                
-                date = ""
-                for selector in date_selectors:
-                    try:
-                        if container.locator(selector).count() > 0:
-                            date = container.locator(selector).inner_text()
-                            break
-                    except Exception:
-                        continue
-                
-                # Extract owner response - fixed selectors
-                response_selectors = [
-                    'xpath=.//div[@class="CDe7pd"]//div[@class="wiI7pd"]',
-                    'css=div.CDe7pd div.wiI7pd',
-                    'div.CDe7pd .wiI7pd'  # CSS shorthand
-                ]
-                
-                owner_response = ""
-                for selector in response_selectors:
-                    try:
-                        if container.locator(selector).count() > 0:
-                            owner_response = container.locator(selector).inner_text()
-                            break
-                    except Exception:
-                        continue
-                
-                # Create review object
-                review = {
-                    'place_id': place_id,
-                    'business_name': business_name,
-                    'business_address': business_address,
-                    'reviewer_name': reviewer_name,
-                    'review_text': review_text,
-                    'rating': stars,
-                    'review_date': date,
-                    'owner_response': owner_response,
-                    'language': detect_language(review_text)
-                }
-                
-                reviews.append(review)
-                logger.debug(f"Extracted review {i+1}: {reviewer_name} - {stars} stars")
-                
-            except Exception as e:
-                logger.error(f"Error extracting review {i+1}: {e}")
-                continue
+        # Process reviews in smaller batches to save continuously
+        batch_size = 10
+        for i in range(0, min(len(review_containers), target_reviews), batch_size):
+            batch_reviews = []
+            end_idx = min(i + batch_size, len(review_containers), target_reviews)
+            
+            for j in range(i, end_idx):
+                container = review_containers[j]
+                try:
+                    # Extract reviewer name - fixed selectors
+                    name_selectors = [
+                        'xpath=.//div[contains(@class, "d4r55")]',
+                        'css=div.d4r55',
+                        '.d4r55'  # CSS shorthand
+                    ]
+                    
+                    reviewer_name = ""
+                    for selector in name_selectors:
+                        try:
+                            if container.locator(selector).count() > 0:
+                                reviewer_name = container.locator(selector).inner_text()
+                                break
+                        except Exception:
+                            continue
+                    
+                    # Extract review text - fixed selectors
+                    text_selectors = [
+                        'xpath=.//div[@class="MyEned"]//span[@class="wiI7pd"]',
+                        'css=div.MyEned span.wiI7pd',
+                        '.wiI7pd'  # CSS shorthand
+                    ]
+                    
+                    review_text = ""
+                    for selector in text_selectors:
+                        try:
+                            if container.locator(selector).count() > 0:
+                                review_text = container.locator(selector).inner_text()
+                                break
+                        except Exception:
+                            continue
+                    
+                    # Extract star rating - fixed selectors
+                    stars_selectors = [
+                        'xpath=.//span[@class="kvMYJc"]',
+                        'css=span.kvMYJc',
+                        '.kvMYJc'  # CSS shorthand
+                    ]
+                    
+                    stars = 0
+                    for selector in stars_selectors:
+                        try:
+                            if container.locator(selector).count() > 0:
+                                stars_text = container.locator(selector).get_attribute('aria-label')
+                                stars = parse_star_rating(stars_text)
+                                break
+                        except Exception:
+                            continue
+                    
+                    # Extract review date - fixed selectors
+                    date_selectors = [
+                        'xpath=.//span[@class="rsqaWe"]',
+                        'css=span.rsqaWe',
+                        '.rsqaWe'  # CSS shorthand
+                    ]
+                    
+                    date = ""
+                    for selector in date_selectors:
+                        try:
+                            if container.locator(selector).count() > 0:
+                                date = container.locator(selector).inner_text()
+                                break
+                        except Exception:
+                            continue
+                    
+                    # Extract owner response - fixed selectors
+                    response_selectors = [
+                        'xpath=.//div[@class="CDe7pd"]//div[@class="wiI7pd"]',
+                        'css=div.CDe7pd div.wiI7pd',
+                        'div.CDe7pd .wiI7pd'  # CSS shorthand
+                    ]
+                    
+                    owner_response = ""
+                    for selector in response_selectors:
+                        try:
+                            if container.locator(selector).count() > 0:
+                                owner_response = container.locator(selector).inner_text()
+                                break
+                        except Exception:
+                            continue
+                    
+                    # Create review object
+                    review = {
+                        'place_id': place_id,
+                        'business_name': business_name,
+                        'business_address': business_address,
+                        'reviewer_name': reviewer_name,
+                        'review_text': review_text,
+                        'rating': stars,
+                        'review_date': date,
+                        'owner_response': owner_response,
+                        'language': detect_language(review_text)
+                    }
+                    
+                    batch_reviews.append(review)
+                    reviews.append(review)
+                    
+                except Exception as e:
+                    logger.error(f"Error extracting review {j+1}: {e}")
+                    continue
+            
+            # Save batch immediately
+            if batch_reviews:
+                save_reviews_to_csv(batch_reviews)
+                logger.info(f"Saved batch of {len(batch_reviews)} reviews")
         
         logger.info(f"Successfully extracted {len(reviews)} reviews")
         return reviews
@@ -785,9 +798,10 @@ def main():
                                     reviews = extract_reviews(page, name, address, place_id, 
                                                            total_reviews_count=review_count,
                                                            max_reviews=max_reviews_to_get)
+                                    if reviews:
+                                        save_reviews_to_csv(reviews)
                                 except ValueError:
                                     review_count = ""
-                                    reviews = extract_reviews(page, name, address, place_id, max_reviews=50)  # Default to 50
                             
                             if page.locator(reviews_average_xpath).count() > 0:
                                 temp = page.locator(reviews_average_xpath).inner_text()
