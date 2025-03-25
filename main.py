@@ -152,7 +152,7 @@ def parse_star_rating(star_text):
         return int(match.group(1))
     return 0
 
-def extract_reviews(page, business_name, business_address, max_reviews=10):
+def extract_reviews(page, business_name, business_address, place_id, total_reviews_count=None, max_reviews=None):
     """Extract reviews for the current business listing"""
     logger = logging.getLogger()
     reviews = []
@@ -195,68 +195,127 @@ def extract_reviews(page, business_name, business_address, max_reviews=10):
         
         # Get initial review count
         review_containers = page.locator(review_containers_selector).all()
-        logger.info(f"Found {len(review_containers)} initial reviews")
+        initial_review_count = len(review_containers)
+        logger.info(f"Found {initial_review_count} initial reviews")
         
-        # If we have reviews, try to load more by scrolling
-        if len(review_containers) > 0:
+        # Determine how many reviews to get
+        target_reviews = total_reviews_count if total_reviews_count else 0
+        if max_reviews:
+            target_reviews = min(target_reviews, max_reviews) if target_reviews > 0 else max_reviews
+        
+        logger.info(f"Target reviews to extract: {target_reviews}")
+        
+        # Only scroll if we haven't loaded all reviews and there are actually more to load
+        if initial_review_count < target_reviews:
             scroll_attempts = 0
-            previous_count = 0
+            previous_count = initial_review_count
             
-            # Find the scrollable container - it's usually a div with role="feed"
-            feed_selectors = [
-                'div[role="feed"]',  # CSS selector
-                '.m6QErb',           # CSS selector for reviews container
-                '[class*="m6QErb"]'   # CSS selector with wildcard for class name
+            # Use the exact XPath for the scrollable container provided by the user
+            exact_feed_selectors = [
+                'xpath=//*[@id="QA0Szd"]/div/div/div[1]/div[3]/div/div[1]/div/div/div[3]',  # Exact XPath 
+                '#QA0Szd > div > div > div.w6VYqd > div.bJzME.Hu9e2e.tTVLSc > div > div.e07Vkf.kA9KIf > div > div > div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde',  # CSS path
+                'div.m6QErb.DxyBCb.kA9KIf.dS8AEf.XiKgde',  # Simple class selector
+                'div[role="feed"]',  # Generic role selector (fallback)
+                '.m6QErb'  # Simple class (fallback)
             ]
             
             # Scroll the feed container to load more reviews
-            while len(review_containers) < max_reviews and scroll_attempts < 5:
-                # Try different scrolling methods
-                try:
-                    # Method 1: Use querySelector and JavaScript
-                    for selector in feed_selectors:
-                        try:
-                            page.evaluate(f"""
-                                const feed = document.querySelector('{selector}');
-                                if (feed) {{
-                                    feed.scrollTop = feed.scrollHeight;
-                                    return true;
-                                }}
-                                return false;
-                            """)
-                            break
-                        except Exception:
-                            continue
-                except Exception as e:
-                    logger.warning(f"Error scrolling review feed with JS: {e}")
-                    
-                    # Method 2: Fallback to mouse wheel
+            while len(review_containers) < target_reviews and scroll_attempts < 10:  # Increased max attempts
+                scroll_success = False
+                
+                # Try multiple approaches to scrolling
+                for selector in exact_feed_selectors:
+                    try:
+                        # Check if selector exists first
+                        if page.locator(selector).count() > 0:
+                            # Fix JavaScript syntax errors in our evaluate calls
+                            if selector.startswith('xpath='):
+                                # For XPath selectors - fixed JS syntax
+                                page.evaluate("""
+                                    (xpath) => {
+                                        const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                                        const element = result.singleNodeValue;
+                                        if (element) {
+                                            element.scrollTop = element.scrollHeight;
+                                            return true;
+                                        }
+                                        return false;
+                                    }
+                                """, selector.replace('xpath=', ''))
+                                scroll_success = True
+                                logger.info(f"Successfully scrolled container with XPath: {selector}")
+                                break
+                            else:
+                                # For CSS selectors - fixed JS syntax
+                                page.evaluate("""
+                                    (selector) => {
+                                        const feed = document.querySelector(selector);
+                                        if (feed) {
+                                            feed.scrollTop = feed.scrollHeight;
+                                            return true;
+                                        }
+                                        return false;
+                                    }
+                                """, selector)
+                                scroll_success = True
+                                logger.info(f"Successfully scrolled container with CSS: {selector}")
+                                break
+                    except Exception as e:
+                        logger.warning(f"Error scrolling with selector {selector}: {e}")
+                
+                # If JavaScript scrolling failed, try using Playwright's mouse wheel
+                if not scroll_success:
                     try:
                         # Find a review element and scroll from there
                         if page.locator(review_containers_selector).count() > 0:
+                            # First make sure an element is in view
                             page.locator(review_containers_selector).first.scroll_into_view_if_needed()
+                            # Then use mouse wheel
                             page.mouse.wheel(0, 2000)
-                        else:
-                            page.mouse.wheel(0, 2000)
+                            logger.info("Used mouse wheel fallback scrolling")
+                            scroll_success = True
                     except Exception as e:
                         logger.warning(f"Fallback scrolling also failed: {e}")
                 
-                page.wait_for_timeout(2000)  # Wait for more reviews to load
+                # Wait for more reviews to load
+                page.wait_for_timeout(2000)
                 
                 # Check if we got more reviews
                 review_containers = page.locator(review_containers_selector).all()
-                logger.info(f"After scroll: {len(review_containers)} reviews")
+                current_count = len(review_containers)
+                logger.info(f"After scroll: {current_count}/{target_reviews} reviews")
                 
-                if len(review_containers) <= previous_count:
+                # If we've loaded all available reviews, stop scrolling
+                if current_count == total_reviews_count and total_reviews_count > 0:
+                    logger.info(f"Loaded all {total_reviews_count} available reviews, stopping scroll")
+                    break
+                
+                if current_count <= previous_count:
                     scroll_attempts += 1
+                    logger.info(f"No new reviews loaded. Attempt {scroll_attempts}/10")
+                    # If we've made multiple attempts with no new reviews, assume we've loaded all available
+                    if scroll_attempts >= 5:  # Increased threshold
+                        logger.info("Reached maximum scroll attempts with no new results, assuming all reviews loaded")
+                        break
                 else:
+                    # Reset scroll attempts if we've loaded new reviews
                     scroll_attempts = 0
+                    logger.info(f"Loaded {current_count - previous_count} new reviews")
                 
-                previous_count = len(review_containers)
+                previous_count = current_count
+        else:
+            if initial_review_count >= total_reviews_count and total_reviews_count > 0:
+                logger.info(f"Already loaded all {total_reviews_count} reviews, no need to scroll")
+            elif initial_review_count >= target_reviews:
+                logger.info(f"Already loaded maximum number of reviews ({target_reviews}), no need to scroll")
+        
+        # Process all found reviews
+        review_count_to_process = min(len(review_containers), target_reviews) if target_reviews > 0 else len(review_containers)
+        logger.info(f"Processing {review_count_to_process} reviews")
         
         # Process all found reviews
         for i, container in enumerate(review_containers):
-            if i >= max_reviews:
+            if i >= review_count_to_process:
                 break
                 
             try:
@@ -343,6 +402,7 @@ def extract_reviews(page, business_name, business_address, max_reviews=10):
                 
                 # Create review object
                 review = {
+                    'place_id': place_id,
                     'business_name': business_name,
                     'business_address': business_address,
                     'reviewer_name': reviewer_name,
@@ -719,9 +779,16 @@ def main():
                                 temp = temp.replace('(','').replace(')','').replace(',','')
                                 try:
                                     review_count = int(temp)
-                                except:
+                                    # Extract all reviews (or up to 100 if there are too many)
+                                    logger.info(f"Total reviews available: {review_count}")
+                                    max_reviews_to_get = min(review_count, 100)  # Cap at 100 reviews per business
+                                    reviews = extract_reviews(page, name, address, place_id, 
+                                                           total_reviews_count=review_count,
+                                                           max_reviews=max_reviews_to_get)
+                                except ValueError:
                                     review_count = ""
-
+                                    reviews = extract_reviews(page, name, address, place_id, max_reviews=50)  # Default to 50
+                            
                             if page.locator(reviews_average_xpath).count() > 0:
                                 temp = page.locator(reviews_average_xpath).inner_text()
                                 temp = temp.replace(' ','').replace(',','.')
@@ -800,17 +867,19 @@ def main():
                             # After extracting all the business data, extract reviews
                             if results_count < total:  # Only extract reviews if we're still collecting results
                                 logger.info("Extracting reviews for this business...")
-                                reviews = extract_reviews(page, name, address, max_reviews=10)
+                                reviews = extract_reviews(page, name, address, place_id, max_reviews=10)
                                 if reviews:
                                     save_reviews_to_csv(reviews)
                             
                             # Create record and save to CSV
                             record = {
+                                'Place ID': place_id,
                                 'Names': name,
                                 'Website': website,
                                 'Introduction': introduction,
                                 'Phone Number': phone_number,
                                 'Address': address,
+                                'Maps URL': url,  # Add the Maps URL to the record
                                 'Review Count': review_count,
                                 'Average Review Count': review_average,
                                 'Store Shopping': store_shopping,
