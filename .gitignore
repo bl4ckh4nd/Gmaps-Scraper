@@ -1,5 +1,17 @@
 /venv
+web/flask_venv/
 *.csv
 *.json
 *.log
 .~lock.reviews.csv#
+.~lock.*.csv#
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+.DS_Store
+*.html
+*.png
+screenshots/
+debug/

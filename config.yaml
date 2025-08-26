@@ -1,0 +1,82 @@
+# Google Maps Scraper Configuration
+# This file contains all configurable settings for the scraper
+
+# Browser Settings
+browser:
+  # Path to Chrome executable (Windows path shown, adjust for your system)
+  executable_path: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+  # Run browser in headless mode (true/false)
+  headless: false
+  # Navigation timeout in milliseconds
+  timeout_navigation: 60000
+  # Element wait timeout in milliseconds
+  timeout_element: 10000
+  # Short timeout for quick operations
+  timeout_short: 5000
+  # Very short timeout for fallback operations
+  timeout_very_short: 3000
+  # Handle Google cookie consent banner automatically
+  handle_cookie_banner: true
+  # Cookie preference: "reject" or "accept" (reject is recommended for privacy)
+  cookie_preference: "reject"
+  # Enable debug mode with screenshots and HTML saves
+  enable_debug_mode: true
+
+# Scraping Behavior Settings
+scraping:
+  # Time to wait between scroll operations (milliseconds)
+  scroll_interval: 1500
+  # Maximum scroll attempts when no new results found
+  max_scroll_attempts: 5
+  # Maximum listings to process per grid cell
+  max_listings_per_cell: 120
+  # Maximum reviews to extract per business
+  max_reviews_per_business: 100
+  # Number of reviews to process in each batch
+  review_batch_size: 10
+  # Default number of reviews if no limit specified
+  default_max_reviews: 50
+  # Default scraping mode: 'fast' (sequential) or 'coverage' (distributed)
+  default_mode: 'fast'
+
+# Geographic Grid Settings
+grid:
+  # Default grid size (creates grid_size x grid_size cells)
+  default_grid_size: 2
+  # Default zoom level for Google Maps
+  default_zoom_level: 12
+  # Default search bounds [min_lat, min_lng, max_lat, max_lng]
+  # Current default is Toronto area - adjust for your region
+  default_bounds: [43.6, -79.5, 43.9, -79.2]
+
+# File and Output Settings
+files:
+  # Filename for business data CSV
+  result_filename: 'result.csv'
+  # Filename for reviews CSV
+  reviews_filename: 'reviews.csv'
+  # Filename for progress tracking
+  progress_filename: 'scraper_progress.json'
+  # Log message format
+  log_format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+
+# Performance and Rate Limiting
+# Note: Adjust these values based on your needs and to avoid being rate-limited
+# Lower values are more respectful to Google's servers but slower
+# Higher values are faster but may trigger anti-bot measures
+
+# Example configurations for different use cases:
+
+# Conservative (slow but safe):
+# scraping:
+#   scroll_interval: 3000
+#   max_scroll_attempts: 3
+#   max_listings_per_cell: 50
+#   max_reviews_per_business: 25
+
+# Aggressive (fast but may get blocked):
+# scraping:
+#   scroll_interval: 500
+#   max_scroll_attempts: 10
+#   max_listings_per_cell: 200
+#   max_reviews_per_business: 200

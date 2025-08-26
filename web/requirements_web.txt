@@ -1,0 +1,19 @@
+# Flask web interface dependencies
+flask>=2.3.0
+flask-cors>=4.0.0
+flask-limiter>=3.0.0
+
+# Production WSGI server (Unix/Linux)
+gunicorn>=20.1.0; sys_platform != "win32"
+
+# Production WSGI server (Windows)
+waitress>=2.1.0; sys_platform == "win32"
+
+# Core Python libraries (included with Python, listed for clarity)
+# uuid - built-in
+# queue - built-in
+# threading - built-in
+# json - built-in
+# os - built-in
+# time - built-in
+# pathlib - built-in
