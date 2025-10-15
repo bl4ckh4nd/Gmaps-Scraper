@@ -11,6 +11,7 @@ A Flask-based web interface for the Google Maps Scraper that allows you to start
 - **Results Download**: Download scraped data in CSV format
 - **Job History**: View completed, failed, and cancelled jobs
 - **Responsive Design**: Works on desktop, tablet, and mobile devices
+- **Settings Management**: Configure the OpenRouter API key and default model without editing files
 
 ## Quick Start
 
@@ -30,7 +31,7 @@ pip install -r requirements.txt
 # Navigate to the web directory
 cd web
 
-# Start the Flask development server
+# Start the Flask development server (loads .env automatically if present)
 python app.py
 ```
 
@@ -47,6 +48,7 @@ The web interface will be available at: http://localhost:5000
 2. **Monitor Progress**: Active jobs show real-time progress bars and statistics
 
 3. **Download Results**: Once completed, download business data and reviews
+4. **Adjust Settings**: Use the Settings tab to store your OpenRouter API key and model overrides.
 
 ## API Endpoints
 
@@ -86,6 +88,8 @@ files:
   result_filename: 'result.csv'
   reviews_filename: 'reviews.csv'
 ```
+
+Sensitive values such as the OpenRouter API key can live in a root-level `.env` file (e.g. `OPENROUTER_API_KEY=...`). The Settings tab in the dashboard writes to this file and updates `config.yaml` for the default model, so you rarely need to edit configuration files by hand.
 
 ## Job Configuration Options
 

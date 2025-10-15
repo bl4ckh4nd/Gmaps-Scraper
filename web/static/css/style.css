@@ -93,6 +93,78 @@ body {
     padding: 0 1rem;
 }
 
+/* Tabs */
+.tab-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+    background: white;
+    padding: 0.5rem;
+    border-radius: var(--border-radius-lg);
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--border-color);
+}
+
+.tab-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: var(--border-radius);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.tab-button i {
+    font-size: 1rem;
+}
+
+.tab-button:hover {
+    background: var(--light-color);
+    color: var(--primary-color);
+}
+
+.tab-button.active {
+    background: var(--primary-color);
+    color: white;
+    box-shadow: var(--shadow-sm);
+}
+
+.tab-panel {
+    display: none;
+}
+
+.tab-panel.active {
+    display: block;
+}
+
+.settings-meta {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+}
+
+.settings-meta code {
+    background: var(--light-color);
+    padding: 0.25rem 0.5rem;
+    border-radius: var(--border-radius-sm);
+    border: 1px solid var(--border-color);
+    font-size: 0.85rem;
+}
+
+.settings-form .form-actions {
+    margin-top: 1rem;
+}
+
 /* Cards */
 .card {
     background: white;
@@ -797,6 +869,16 @@ input[type="range"]::-moz-range-thumb {
 @media (max-width: 768px) {
     .container {
         padding: 0 0.75rem;
+    }
+    
+    .tab-bar {
+        flex-direction: column;
+        padding: 0.5rem 0.75rem;
+    }
+    
+    .tab-button {
+        width: 100%;
+        justify-content: center;
     }
     
     .form-row {

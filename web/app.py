@@ -3,24 +3,36 @@
 import json
 import os
 import time
-from datetime import datetime
-from typing import Dict, Any, Optional
-from flask import Flask, request, jsonify, render_template, Response, send_file
-from flask_cors import CORS
 from dataclasses import asdict
+from datetime import datetime
 import logging
 from pathlib import Path
+import sys
+from typing import Any, Dict, Optional, Tuple
 
-from scraper_service import scraper_manager, JobConfig, JobStatus
+from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask_cors import CORS
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scraper_service import JobConfig, JobStatus, scraper_manager
+from src.config import Config
+from src.utils import load_dotenv, upsert_env_file
 
 # Configure Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
+app.config["SECRET_KEY"] = "your-secret-key-change-in-production"
 CORS(app)  # Enable CORS for all domains
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load .env so environment variables (OpenRouter key, etc.) are available to the app.
+DOTENV_PATH = PROJECT_ROOT / ".env"
+load_dotenv(DOTENV_PATH, override=False)
 
 
 # Error handlers
@@ -440,16 +452,127 @@ def get_job_stats(job_id):
         return jsonify({'error': 'Failed to get job stats'}), 500
 
 
-@app.route('/api/config', methods=['GET'])
+def _load_owner_settings() -> Tuple[Config, Dict[str, Any]]:
+    """Retrieve config and a mutable snapshot of owner enrichment settings."""
+    config_path = PROJECT_ROOT / "config.yaml"
+    try:
+        config = Config.from_file(str(config_path))
+    except Exception:
+        config = Config()
+
+    owner_settings = config.settings.owner_enrichment
+    snapshot = {
+        "enabled": owner_settings.enabled,
+        "openrouter_api_key_env": owner_settings.openrouter_api_key_env,
+        "openrouter_default_model": owner_settings.openrouter_default_model,
+        "allow_free_models_only": owner_settings.allow_free_models_only,
+    }
+    return config, snapshot
+
+
+def _env_has_key(env_name: str) -> bool:
+    return bool(os.getenv(env_name))
+
+
+@app.route("/api/config", methods=["GET"])
 def get_config():
-    """Get default configuration values."""
-    return jsonify({
-        'default_bounds': [43.6, -79.5, 43.9, -79.2],  # Toronto area
-        'default_grid_size': 2,
-        'max_results': 10000,
-        'max_reviews': 200,
-        'supported_file_types': ['business_data', 'reviews_data', 'log_file']
-    })
+    """Get default configuration values including owner enrichment defaults."""
+    config, owner_snapshot = _load_owner_settings()
+    env_var = owner_snapshot["openrouter_api_key_env"]
+    return jsonify(
+        {
+            "default_bounds": list(config.settings.grid.default_bounds),
+            "default_grid_size": config.settings.grid.default_grid_size,
+            "max_results": 10000,
+            "max_reviews": config.settings.scraping.max_reviews_per_business,
+            "supported_file_types": ["business_data", "reviews_data", "log_file"],
+            "owner_enrichment": {
+                "enabled": owner_snapshot["enabled"],
+                "api_key_env": env_var,
+                "api_key_set": _env_has_key(env_var),
+                "default_model": owner_snapshot["openrouter_default_model"],
+                "allow_free_models_only": owner_snapshot["allow_free_models_only"],
+            },
+        }
+    )
+
+
+@app.route("/api/settings/openrouter", methods=["GET"])
+def get_openrouter_settings():
+    """Expose current OpenRouter configuration without revealing secrets."""
+    _, owner_snapshot = _load_owner_settings()
+    env_var = owner_snapshot["openrouter_api_key_env"]
+    return jsonify(
+        {
+            "api_key_env": env_var,
+            "api_key_set": _env_has_key(env_var),
+            "default_model": owner_snapshot["openrouter_default_model"],
+            "allow_free_models_only": owner_snapshot["allow_free_models_only"],
+        }
+    )
+
+
+@app.route("/api/settings/openrouter", methods=["POST"])
+def update_openrouter_settings():
+    """Allow the UI to set/clear the OpenRouter API key and default model."""
+    payload = request.get_json() or {}
+    config, owner_snapshot = _load_owner_settings()
+    env_var = owner_snapshot["openrouter_api_key_env"]
+
+    api_key = payload.get("api_key")
+    default_model = payload.get("default_model")
+    allow_free_only = payload.get("allow_free_models_only")
+
+    updates = {}
+    removals = []
+
+    if api_key is not None:
+        api_key = str(api_key).strip()
+        if api_key:
+            updates[env_var] = api_key
+        else:
+            removals.append(env_var)
+
+    try:
+        upsert_env_file(DOTENV_PATH, updates, remove_keys=removals)
+        if updates or removals:
+            load_dotenv(DOTENV_PATH, override=True)
+    except Exception as exc:
+        logger.error("Failed to update .env: %s", exc)
+        return jsonify({"error": "Failed to update API key storage"}), 500
+
+    owner_settings = config.settings.owner_enrichment
+    has_changes = False
+
+    if default_model is not None:
+        default_model = str(default_model).strip()
+        if not default_model:
+            return jsonify({"error": "default_model cannot be empty"}), 400
+        if default_model != owner_settings.openrouter_default_model:
+            owner_settings.openrouter_default_model = default_model
+            has_changes = True
+
+    if allow_free_only is not None:
+        allow_flag = bool(allow_free_only)
+        if allow_flag != owner_settings.allow_free_models_only:
+            owner_settings.allow_free_models_only = allow_flag
+            has_changes = True
+
+    if has_changes:
+        try:
+            config.save_to_file(str(PROJECT_ROOT / "config.yaml"))
+        except Exception as exc:
+            logger.error("Failed to persist config.yaml owner settings: %s", exc)
+            return jsonify({"error": "Saved API key, but failed to update config"}), 500
+
+    return jsonify(
+        {
+            "api_key_env": env_var,
+            "api_key_set": _env_has_key(env_var),
+            "default_model": owner_settings.openrouter_default_model,
+            "allow_free_models_only": owner_settings.allow_free_models_only,
+        }
+    )
 
 
 # Cleanup task - using with_appcontext instead of deprecated before_first_request

@@ -62,7 +62,8 @@ To use this script, follow these steps:
    ```bash
    pip install "crawl4ai @ git+https://github.com/unclecode/crawl4ai.git"
    crawl4ai install browser
-   export OPENROUTER_API_KEY=your-openrouter-key
+   # Provide your OpenRouter key via environment or .env
+   echo "OPENROUTER_API_KEY=your-openrouter-key" >> .env
    python main_new.py -s "coffee shops berlin" -t 10 --owner-enrichment --owner-model google/gemini-2.0-flash-exp:free
    ```
    The resulting CSV will include additional owner columns such as `Owner Name`, `Owner Status`, and `Owner Source URL`.
@@ -90,14 +91,14 @@ From the dashboard, use the “Enrich Existing CSV” card to launch the same pr
 - Prepare Crawl4AI locally:
   - `pip install crawl4ai` (or install from GitHub for the latest release).
   - `crawl4ai install browser` to download the playwright engine Crawl4AI relies on.
-- Provide credentials via environment variables:
+- Provide credentials via environment variables or a `.env` file:
   - `OPENROUTER_API_KEY` – API key for OpenRouter (free-tier models recommended, e.g. `google/gemini-2.0-flash-exp:free`).
   - Optionally `OPENROUTER_DEFAULT_MODEL` to change the default LLM globally.
+  - You can also configure these through the web dashboard’s Settings tab, which writes to `.env` and updates `config.yaml` for you.
 - Adjust `config.yaml` → `owner_enrichment` block to fine tune crawl depth, allowed models, retry limits, and logging.
 - From the CLI you can override per run with `--owner-enrichment`, `--owner-model`, and `--owner-max-pages`.
 ## Video Example:
 I've included an example of running the code below.
 
 https://www.linkedin.com/posts/zohaibbashir_python-data-webscraping-activity-7093920891411062784-flEQ
-
 

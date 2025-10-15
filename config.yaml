@@ -3,8 +3,8 @@
 
 # Browser Settings
 browser:
-  # Path to Chrome executable (Windows path shown, adjust for your system)
-  executable_path: 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+  # Optional path to Chrome/Chromium executable (leave blank to auto-detect)
+  executable_path: ''
   # Run browser in headless mode (true/false)
   headless: false
   # Navigation timeout in milliseconds

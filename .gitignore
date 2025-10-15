@@ -11,7 +11,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 .DS_Store
+.env
 *.html
 *.png
 screenshots/
 debug/
+*.md

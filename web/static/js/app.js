@@ -2,6 +2,7 @@
 
 // Global variables
 let map = null;
+let mapInitialized = false;
 let boundsRectangle = null;
 let activeJobEventSources = new Map();
 let lastJobsUpdate = 0;
@@ -14,21 +15,95 @@ const CONFIG = {
     mapCenter: [52.52, 13.405],
     mapZoom: 11
 };
+const TAB_STORAGE_KEY = 'gmaps_scraper_active_tab';
+
+function setupTabs() {
+    const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
+    const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+
+    if (!tabButtons.length || !tabPanels.length) {
+        return;
+    }
+
+    const availableTabs = new Set(tabButtons.map((button) => button.dataset.tab));
+    let initialTab = 'dashboard';
+
+    try {
+        const storedTab = window.localStorage.getItem(TAB_STORAGE_KEY);
+        if (storedTab && availableTabs.has(storedTab)) {
+            initialTab = storedTab;
+        }
+    } catch (error) {
+        console.debug('Unable to read tab preference:', error);
+    }
+
+    const activateTab = (tabName, { persist = true } = {}) => {
+        if (!availableTabs.has(tabName)) {
+            tabName = 'dashboard';
+        }
+
+        tabButtons.forEach((button) => {
+            const isActive = button.dataset.tab === tabName;
+            button.classList.toggle('active', isActive);
+            button.setAttribute('aria-selected', String(isActive));
+        });
+
+        tabPanels.forEach((panel) => {
+            const isActive = panel.dataset.tabPanel === tabName;
+            panel.classList.toggle('active', isActive);
+            panel.toggleAttribute('hidden', !isActive);
+        });
+
+        if (persist) {
+            try {
+                window.localStorage.setItem(TAB_STORAGE_KEY, tabName);
+            } catch (error) {
+                console.debug('Unable to persist tab preference:', error);
+            }
+        }
+
+        if (tabName === 'dashboard') {
+            initializeMapIfNeeded();
+        }
+    };
+
+    tabButtons.forEach((button) => {
+        button.addEventListener('click', () => activateTab(button.dataset.tab));
+    });
+
+    // Activate desired initial tab without persisting the selection twice
+    activateTab(initialTab, { persist: false });
+}
+
+function initializeMapIfNeeded() {
+    if (!mapInitialized) {
+        initializeMap();
+        return;
+    }
+
+    if (map) {
+        requestAnimationFrame(() => {
+            map.invalidateSize();
+        });
+    }
+}
 
 // Initialize the application
 function initializeApp() {
     console.log('Initializing Google Maps Scraper Web Interface');
     
-    // Initialize map
-    initializeMap();
+    // Set up tabs and lazy-load heavier UI
+    setupTabs();
     
     // Set up form submission
     setupFormSubmission();
     setupOwnerEnrichmentForm();
+    setupSettingsForms();
     
     // Load initial data
     loadJobs();
     updateHeaderStats();
+    loadSettings();
     
     // Start periodic refresh
     setInterval(() => {
@@ -42,6 +117,11 @@ function initializeApp() {
 
 // Map initialization
 function initializeMap() {
+    if (mapInitialized && map) {
+        requestAnimationFrame(() => map.invalidateSize());
+        return;
+    }
+
     try {
         // Initialize Leaflet map
         map = L.map('map').setView(CONFIG.mapCenter, CONFIG.mapZoom);
@@ -54,6 +134,7 @@ function initializeMap() {
         // Drawing controls will be enabled via toggle button
         
         console.log('Map initialized successfully');
+        mapInitialized = true;
     } catch (error) {
         console.error('Error initializing map:', error);
         showToast('Error loading map', 'error');
@@ -471,6 +552,127 @@ function prepareOwnerEnrichmentJob(data) {
     return job;
 }
 
+function setupSettingsForms() {
+    const apiForm = document.getElementById('openrouter-api-form');
+    const apiInput = document.getElementById('openrouter-api-key');
+    const clearButton = document.getElementById('openrouter-api-clear');
+    const modelForm = document.getElementById('openrouter-model-form');
+
+    if (apiForm && apiInput) {
+        apiForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const apiKey = apiInput.value.trim();
+            if (!apiKey) {
+                showToast('Enter an API key or use Clear to remove it.', 'info');
+                return;
+            }
+            await submitOpenRouterSettings({ api_key: apiKey }, 'OpenRouter API key saved');
+            apiInput.value = '';
+        });
+    }
+
+    if (clearButton) {
+        clearButton.addEventListener('click', async () => {
+            if (!confirm('Remove the stored OpenRouter API key? This will disable owner enrichment until a new key is provided.')) {
+                return;
+            }
+            await submitOpenRouterSettings({ api_key: '' }, 'OpenRouter API key cleared');
+        });
+    }
+
+    if (modelForm) {
+        modelForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const modelInput = document.getElementById('openrouter-default-model');
+            const allowFreeInput = document.getElementById('openrouter-allow-free');
+            const defaultModel = modelInput ? modelInput.value.trim() : '';
+            if (!defaultModel) {
+                showToast('Default model cannot be blank.', 'error');
+                return;
+            }
+            await submitOpenRouterSettings(
+                {
+                    default_model: defaultModel,
+                    allow_free_models_only: Boolean(allowFreeInput && allowFreeInput.checked),
+                },
+                'Owner enrichment defaults saved',
+            );
+        });
+    }
+}
+
+async function loadSettings() {
+    try {
+        const response = await fetch('/api/settings/openrouter');
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to load settings');
+        }
+        updateSettingsUI(data);
+    } catch (error) {
+        console.error('Error loading settings:', error);
+        showToast(error.message || 'Failed to load settings', 'error');
+    }
+}
+
+async function submitOpenRouterSettings(payload, successMessage) {
+    try {
+        showLoadingOverlay('Saving settings...');
+        const response = await fetch('/api/settings/openrouter', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Failed to update settings');
+        }
+        updateSettingsUI(data);
+        if (successMessage) {
+            showToast(successMessage, 'success');
+        }
+    } catch (error) {
+        console.error('Error updating settings:', error);
+        showToast(error.message || 'Failed to update settings', 'error');
+        throw error;
+    } finally {
+        hideLoadingOverlay();
+    }
+}
+
+function updateSettingsUI(data) {
+    const envSpan = document.getElementById('settings-api-key-env');
+    const statusBadge = document.getElementById('settings-api-key-status');
+    const apiInput = document.getElementById('openrouter-api-key');
+    const modelInput = document.getElementById('openrouter-default-model');
+    const allowFreeInput = document.getElementById('openrouter-allow-free');
+
+    if (envSpan && data.api_key_env) {
+        envSpan.textContent = data.api_key_env;
+    }
+
+    if (statusBadge) {
+        const badgeClass = data.api_key_set ? 'status-badge status-completed' : 'status-badge status-failed';
+        statusBadge.className = badgeClass;
+        statusBadge.textContent = data.api_key_set ? 'Configured' : 'Not configured';
+    }
+
+    if (apiInput) {
+        apiInput.value = '';
+        apiInput.placeholder = data.api_key_set ? 'Key stored • enter to replace' : 'Enter OpenRouter API key';
+    }
+
+    if (modelInput && typeof data.default_model === 'string') {
+        modelInput.value = data.default_model;
+    }
+
+    if (allowFreeInput && typeof data.allow_free_models_only === 'boolean') {
+        allowFreeInput.checked = data.allow_free_models_only;
+    }
+}
+
 // Job management
 async function loadJobs() {
     try {
@@ -747,21 +949,48 @@ function startJobMonitoring(jobId) {
 function updateJobDisplay(job) {
     const jobElement = document.querySelector(`[data-job-id="${job.job_id}"]`);
     if (!jobElement) return;
+
+    const isOwnerJob = job.config && job.config.job_type === 'owner_enrichment';
+    const progress = job.progress || {};
     
     // Update progress bar
     const progressBar = jobElement.querySelector('.progress-fill');
     const progressLabel = jobElement.querySelector('.progress-label span:last-child');
     
     if (progressBar && progressLabel) {
-        const percentage = Math.round(job.progress.percentage);
+        const percentage = Math.round(progress.percentage || 0);
         progressBar.style.width = `${percentage}%`;
-        progressLabel.textContent = `${job.progress.current} / ${job.progress.total} (${percentage}%)`;
+        if (isOwnerJob) {
+            const processed = Number(progress.processed_rows ?? 0);
+            const totalRows = Number(progress.total_rows ?? 0);
+            progressLabel.textContent = `${processed.toLocaleString()} / ${totalRows.toLocaleString()} (${percentage}%)`;
+        } else {
+            const current = Number(progress.current ?? 0);
+            const total = Number(progress.total ?? 0);
+            progressLabel.textContent = `${current.toLocaleString()} / ${total.toLocaleString()} (${percentage}%)`;
+        }
     }
     
     // Update stats
     const statValues = jobElement.querySelectorAll('.stat-value');
-    if (statValues.length >= 2) {
-        statValues[1].textContent = job.progress.current.toLocaleString(); // Collected count
+    if (isOwnerJob) {
+        if (statValues[0]) {
+            const totalRows = Number(progress.total_rows ?? 0);
+            statValues[0].textContent = totalRows.toLocaleString();
+        }
+        if (statValues[1]) {
+            const processedRows = Number(progress.processed_rows ?? 0);
+            statValues[1].textContent = processedRows.toLocaleString();
+        }
+        if (statValues[2]) {
+            const ownersFound = Number(progress.owners_found ?? 0);
+            statValues[2].textContent = ownersFound.toLocaleString();
+        }
+    } else if (statValues.length >= 2) {
+        const total = Number(progress.total ?? 0);
+        const current = Number(progress.current ?? 0);
+        statValues[0].textContent = total.toLocaleString();
+        statValues[1].textContent = current.toLocaleString();
     }
     
     // Update time info
@@ -774,6 +1003,15 @@ function updateJobDisplay(job) {
     const estimatedSpan = jobElement.querySelector('.time-info:nth-child(3) span');
     if (estimatedSpan && job.estimated_remaining) {
         estimatedSpan.textContent = `~${job.estimated_remaining}`;
+    }
+
+    // Update status badge text/class if present
+    const statusBadge = jobElement.querySelector('.status-badge');
+    if (statusBadge) {
+        const statusClass = getStatusClass(job.status);
+        const statusIcon = getStatusIcon(job.status);
+        statusBadge.className = `status-badge ${statusClass}`;
+        statusBadge.innerHTML = `<i class="fas ${statusIcon}"></i> ${job.status.toUpperCase()}`;
     }
 }
 

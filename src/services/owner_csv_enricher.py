@@ -11,7 +11,7 @@ from typing import Callable, Dict, Iterable, Optional
 
 from ..config import Config, OwnerEnrichmentSettings
 from ..models import Business
-from ..utils import OwnerEnrichmentService
+from ..utils.owner_enrichment_service import OwnerEnrichmentService
 
 
 OWNER_COLUMNS = [

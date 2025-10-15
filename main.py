@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 from dataclasses import dataclass, asdict, field
 import pandas as pd
@@ -8,6 +9,8 @@ import time
 import logging
 import datetime
 import re
+
+from src.utils import load_dotenv
 
 l1=[]
 l2=[]
@@ -37,6 +40,9 @@ store_del_list=[]
 place_t_list=[]
 open_list=[]
 intro_list=[]
+
+# Ensure environment variables (e.g. OPENROUTER_API_KEY) are loaded for legacy flows.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 def extract_data(xpath, data_list, page):
     if page.locator(xpath).count() > 0:
