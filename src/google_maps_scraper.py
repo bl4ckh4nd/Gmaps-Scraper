@@ -10,7 +10,13 @@ from .models import Business, Review
 from .scraper import BusinessScraper, ReviewScraper
 from .navigation import GridNavigator, PageNavigator
 from .persistence import CSVWriter, ProgressTracker
-from .utils import setup_logging, ScraperException, NavigationException, ExtractionException
+from .utils import (
+    setup_logging,
+    ScraperException,
+    NavigationException,
+    ExtractionException,
+    OwnerEnrichmentService,
+)
 from .utils.logger import get_component_logger, ScraperLoggerAdapter, log_scraping_progress
 from .utils.review_analyzer import analyze_reviews
 
@@ -37,7 +43,11 @@ class GoogleMapsScraper:
         self.progress_tracker = ProgressTracker(
             self.config.settings.files.progress_filename
         )
-        
+        self.owner_enrichment_service = OwnerEnrichmentService(
+            self.config.settings.owner_enrichment,
+            logger=get_component_logger('OwnerEnrichment'),
+        )
+
         # Browser-dependent components (initialized in run)
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
@@ -285,22 +295,38 @@ class GoogleMapsScraper:
                     # Analyze reviews to calculate metrics
                     try:
                         review_metrics = analyze_reviews(reviews)
-                        
+
                         # Update business with review metrics
                         business.reply_rate_good = review_metrics['reply_rate_good']
                         business.reply_rate_bad = review_metrics['reply_rate_bad'] 
                         business.avg_time_between_reviews = review_metrics['avg_time_between_reviews']
-                        
+
                         logger.debug(f"Review metrics: good_reply={review_metrics['reply_rate_good']:.1f}%, "
                                    f"bad_reply={review_metrics['reply_rate_bad']:.1f}%, "
                                    f"avg_days={review_metrics['avg_time_between_reviews']}")
-                        
+
                     except Exception as e:
                         logger.warning(f"Failed to analyze reviews for {business.name}: {e}")
-                    
+
                     # Write reviews to CSV
                     self.csv_writer.write_reviews(reviews)
-            
+
+            if self.owner_enrichment_service.is_enabled():
+                try:
+                    owner_details = self.owner_enrichment_service.enrich_business(business)
+                    business.owner_details = owner_details
+                    logger.debug(
+                        "Owner enrichment for %s resulted in status %s",
+                        business.name,
+                        owner_details.status,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Owner enrichment failed for %s: %s",
+                        business.name,
+                        exc,
+                    )
+
             # Write business data (now with review metrics)
             if not self.csv_writer.write_business(business):
                 logger.debug(f"Duplicate business skipped: {business.name}")
@@ -364,5 +390,14 @@ def create_scraper_from_args(args: argparse.Namespace) -> GoogleMapsScraper:
     
     if hasattr(args, 'max_reviews') and args.max_reviews:
         config.settings.scraping.max_reviews_per_business = args.max_reviews
-    
+
+    if getattr(args, 'owner_enrichment', False):
+        config.settings.owner_enrichment.enabled = True
+
+    if getattr(args, 'owner_model', None):
+        config.settings.owner_enrichment.openrouter_default_model = args.owner_model
+
+    if getattr(args, 'owner_max_pages', None):
+        config.settings.owner_enrichment.max_pages = args.owner_max_pages
+
     return GoogleMapsScraper(config)

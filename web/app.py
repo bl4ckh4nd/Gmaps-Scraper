@@ -46,66 +46,102 @@ def job_status_to_dict(job_status: JobStatus) -> Dict[str, Any]:
 def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Optional[str]]:
     """Validate and create JobConfig from request data."""
     try:
-        # Required fields
+        job_type = data.get('job_type', 'scrape')
+
+        if job_type == 'owner_enrichment':
+            csv_path = str(data.get('owner_csv_path', '')).strip()
+            if not csv_path:
+                return None, "owner_csv_path is required for owner enrichment jobs"
+
+            output_path = data.get('owner_output_path')
+            if output_path is not None and not isinstance(output_path, str):
+                return None, "owner_output_path must be a string"
+
+            owner_in_place = bool(data.get('owner_in_place', False))
+            if owner_in_place and output_path:
+                return None, "owner_in_place cannot be combined with owner_output_path"
+
+            config_overrides = data.get('config_overrides', {})
+            if not isinstance(config_overrides, dict):
+                return None, "config_overrides must be an object"
+
+            job_config = JobConfig(
+                job_type='owner_enrichment',
+                owner_csv_path=csv_path,
+                owner_output_path=output_path,
+                owner_in_place=owner_in_place,
+                owner_resume=bool(data.get('owner_resume', False)),
+                owner_model=data.get('owner_model'),
+                owner_skip_existing=bool(data.get('owner_skip_existing', True)),
+                config_overrides=config_overrides,
+            )
+            return job_config, None
+
+        # Scrape job validation
         search_term = data.get('search_term', '').strip()
         if not search_term:
             return None, "search_term is required"
-        
+
         total_results = data.get('total_results')
         if not isinstance(total_results, int) or total_results <= 0:
             return None, "total_results must be a positive integer"
-        
         if total_results > 10000:
             return None, "total_results cannot exceed 10000"
-        
-        # Optional fields
+
         bounds = data.get('bounds')
         if bounds is not None:
             if not isinstance(bounds, list) or len(bounds) != 4:
                 return None, "bounds must be an array of 4 numbers [min_lat, min_lng, max_lat, max_lng]"
-            
             try:
                 bounds = tuple(float(x) for x in bounds)
-                min_lat, min_lng, max_lat, max_lng = bounds
-                
-                if not (-90 <= min_lat <= 90) or not (-90 <= max_lat <= 90):
-                    return None, "Latitude values must be between -90 and 90"
-                
-                if not (-180 <= min_lng <= 180) or not (-180 <= max_lng <= 180):
-                    return None, "Longitude values must be between -180 and 180"
-                
-                if min_lat >= max_lat:
-                    return None, "min_lat must be less than max_lat"
-                
-                if min_lng >= max_lng:
-                    return None, "min_lng must be less than max_lng"
-                    
             except (ValueError, TypeError):
                 return None, "bounds must contain valid numbers"
-        
+
+            min_lat, min_lng, max_lat, max_lng = bounds
+            if not (-90 <= min_lat <= 90) or not (-90 <= max_lat <= 90):
+                return None, "Latitude values must be between -90 and 90"
+            if not (-180 <= min_lng <= 180) or not (-180 <= max_lng <= 180):
+                return None, "Longitude values must be between -180 and 180"
+            if min_lat >= max_lat:
+                return None, "min_lat must be less than max_lat"
+            if min_lng >= max_lng:
+                return None, "min_lng must be less than max_lng"
+
         grid_size = data.get('grid_size', 2)
         if not isinstance(grid_size, int) or not (1 <= grid_size <= 10):
             return None, "grid_size must be an integer between 1 and 10"
-        
+
         max_reviews = data.get('max_reviews')
         if max_reviews is not None:
             if not isinstance(max_reviews, int) or max_reviews < 0:
                 return None, "max_reviews must be a non-negative integer"
-        
+
         headless = data.get('headless', True)
         if not isinstance(headless, bool):
             return None, "headless must be a boolean"
-        
+
         scraping_mode = data.get('scraping_mode', 'fast')
         if scraping_mode not in ['fast', 'coverage']:
             return None, "scraping_mode must be 'fast' or 'coverage'"
-        
+
         config_overrides = data.get('config_overrides', {})
         if not isinstance(config_overrides, dict):
             return None, "config_overrides must be an object"
-        
-        # Create JobConfig
+
+        owner_override = config_overrides.get('owner_enrichment')
+        if owner_override is not None:
+            if not isinstance(owner_override, dict):
+                return None, "owner_enrichment override must be an object"
+            if 'max_pages' in owner_override:
+                try:
+                    max_pages = int(owner_override['max_pages'])
+                except (TypeError, ValueError):
+                    return None, "owner_enrichment.max_pages must be an integer"
+                if max_pages < 1 or max_pages > 10:
+                    return None, "owner_enrichment.max_pages must be between 1 and 10"
+
         job_config = JobConfig(
+            job_type='scrape',
             search_term=search_term,
             total_results=total_results,
             bounds=bounds,
@@ -115,9 +151,8 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
             headless=headless,
             config_overrides=config_overrides
         )
-        
         return job_config, None
-        
+
     except Exception as e:
         return None, f"Invalid request data: {str(e)}"
 
@@ -168,8 +203,11 @@ def start_job():
         
         # Start the job
         job_id = scraper_manager.start_job(job_config)
-        
-        logger.info(f"Started job {job_id}: {job_config.search_term}")
+
+        if job_config.job_type == 'owner_enrichment':
+            logger.info(f"Started owner enrichment job {job_id}: {job_config.owner_csv_path}")
+        else:
+            logger.info(f"Started job {job_id}: {job_config.search_term}")
         
         return jsonify({
             'job_id': job_id,

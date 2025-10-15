@@ -7,9 +7,12 @@ Extracts business information and reviews from Google Maps using geographic grid
 
 import argparse
 import sys
-from typing import Tuple
+from pathlib import Path
+from typing import Dict, Tuple
 
+from src.config import Config
 from src.google_maps_scraper import GoogleMapsScraper, create_scraper_from_args
+from src.services import OwnerCSVEnricher, OwnerCSVEnrichmentOptions
 from src.utils import ScraperException
 
 
@@ -34,18 +37,16 @@ Configuration:
         """
     )
     
-    # Required arguments
+    # Scraping arguments (required when running scrape mode)
     parser.add_argument(
         "-s", "--search", 
-        type=str, 
-        required=True,
-        help="Search term (required)"
+        type=str,
+        help="Search term (required for scraping)"
     )
     parser.add_argument(
         "-t", "--total", 
-        type=int, 
-        required=True,
-        help="Total number of results to collect (required)"
+        type=int,
+        help="Total number of results to collect (required for scraping)"
     )
     
     # Optional arguments
@@ -90,7 +91,49 @@ Configuration:
         default='INFO',
         help="Logging level (default: INFO)"
     )
-    
+    parser.add_argument(
+        "--owner-enrichment",
+        action="store_true",
+        help="Enable adaptive owner enrichment workflow"
+    )
+    parser.add_argument(
+        "--owner-model",
+        type=str,
+        help="Override default OpenRouter model for owner extraction"
+    )
+    parser.add_argument(
+        "--owner-max-pages",
+        type=int,
+        help="Maximum pages to crawl per business website for owner enrichment"
+    )
+    parser.add_argument(
+        "--owner-enrich-csv",
+        type=str,
+        help="Path to an existing business CSV to enrich with owner data"
+    )
+    parser.add_argument(
+        "--owner-output",
+        type=str,
+        help="Optional output path for owner-enriched CSV"
+    )
+    parser.add_argument(
+        "--owner-in-place",
+        action="store_true",
+        help="Overwrite the input CSV with enriched data (creates .bak backup)"
+    )
+    parser.add_argument(
+        "--owner-resume",
+        action="store_true",
+        help="Resume a previously interrupted owner enrichment run"
+    )
+    parser.set_defaults(owner_skip_existing=True)
+    parser.add_argument(
+        "--owner-no-skip-existing",
+        dest="owner_skip_existing",
+        action="store_false",
+        help="Re-enrich rows even if they already contain owner information"
+    )
+
     return parser.parse_args()
 
 
@@ -138,12 +181,15 @@ def validate_arguments(args: argparse.Namespace) -> None:
     Raises:
         ValueError: If arguments are invalid
     """
+    if getattr(args, 'owner_enrich_csv', None):
+        return
+
     # Validate search term
     if not args.search or not args.search.strip():
         raise ValueError("Search term cannot be empty")
-    
+
     # Validate total results
-    if args.total <= 0:
+    if args.total is None or args.total <= 0:
         raise ValueError("Total results must be positive")
     if args.total > 10000:
         print("Warning: Large result counts may take a very long time")
@@ -156,6 +202,77 @@ def validate_arguments(args: argparse.Namespace) -> None:
     if args.max_reviews is not None and args.max_reviews < 0:
         raise ValueError("Max reviews cannot be negative")
 
+    if getattr(args, 'owner_max_pages', None) is not None and args.owner_max_pages <= 0:
+        raise ValueError("Owner max pages must be positive")
+
+
+def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
+    """Run owner enrichment on an existing CSV file."""
+
+    csv_path = Path(args.owner_enrich_csv).expanduser()
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Owner enrichment CSV not found: {csv_path}")
+
+    config_path = getattr(args, 'config', 'config.yaml')
+    try:
+        config = Config.from_file(config_path)
+    except Exception:
+        config = Config()
+
+    output_path = Path(args.owner_output).expanduser() if args.owner_output else None
+    if args.owner_in_place and output_path and output_path != csv_path:
+        raise ValueError("--owner-in-place cannot be combined with --owner-output")
+
+    options = OwnerCSVEnrichmentOptions(
+        input_path=csv_path,
+        output_path=output_path,
+        in_place=args.owner_in_place,
+        resume=args.owner_resume,
+        owner_model=args.owner_model,
+        skip_existing=args.owner_skip_existing,
+    )
+
+    print("=" * 60)
+    print("Owner Enrichment Mode")
+    print("=" * 60)
+    print(f"Input CSV: {csv_path}")
+    if options.in_place:
+        print("Output: in-place (backup .bak)")
+    else:
+        target = options.output_path or csv_path.with_name(f"{csv_path.stem}_owner_enriched{csv_path.suffix}")
+        print(f"Output CSV: {target}")
+    if args.owner_model:
+        print(f"OpenRouter model override: {args.owner_model}")
+    print("Skip existing owners:" , "yes" if options.skip_existing else "no")
+    print("Resume previous run:" , "yes" if options.resume else "no")
+    print("=" * 60)
+
+    enricher = OwnerCSVEnricher(config)
+
+    def progress(stats: Dict[str, int]) -> None:
+        total = stats.get("total_rows", 0) or total_rows
+        processed = stats.get("processed_rows", 0)
+        owners = stats.get("owners_found", 0)
+        print(
+            f"Processed {processed}/{total} rows | Owners found: {owners}",
+            end="\r",
+            flush=True,
+        )
+
+    result = enricher.enrich(options, progress_callback=progress)
+
+    print("\n" + "-" * 60)
+    print("Owner enrichment completed")
+    print(f"Total rows read: {result.total_rows}")
+    print(f"Rows written: {result.processed_rows}")
+    print(f"Owners found: {result.owners_found}")
+    if result.skipped_existing:
+        print(f"Skipped existing owners: {result.skipped_existing}")
+    if result.failed_rows:
+        print(f"Rows failed: {result.failed_rows}")
+    if result.output_path:
+        print(f"Output saved to: {result.output_path}")
+
 
 def main():
     """Main entry point for the Google Maps scraper."""
@@ -163,7 +280,11 @@ def main():
         # Parse and validate arguments
         args = parse_arguments()
         validate_arguments(args)
-        
+
+        if args.owner_enrich_csv:
+            run_owner_csv_enrichment(args)
+            return
+
         # Parse bounds if provided
         bounds = None
         if args.bounds:
@@ -183,8 +304,13 @@ def main():
         if bounds:
             print(f"Bounds: {bounds}")
         print(f"Config file: {args.config}")
+        owner_settings = scraper.config.settings.owner_enrichment
+        owner_status = "enabled" if owner_settings.enabled else "disabled"
+        print(f"Owner enrichment: {owner_status}")
+        if owner_settings.enabled:
+            print(f"Owner model: {owner_settings.openrouter_default_model}")
         print("="*60)
-        
+
         # Run the scraper
         scraper.run(
             search_term=args.search,

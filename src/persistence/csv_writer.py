@@ -144,45 +144,63 @@ class CSVWriter:
             PersistenceException: If file operations fail
         """
         try:
+            expected_columns = list(new_data.keys())
+
             # Check if file exists
             if not os.path.exists(filename):
-                # Create new file with header
-                df = pd.DataFrame([new_data])
+                df = pd.DataFrame([new_data], columns=expected_columns)
                 df.to_csv(filename, index=False)
                 return True
-            
-            if check_duplicates:
-                # Read existing data to check for duplicates
-                existing_df = pd.read_csv(filename)
-                
-                if len(existing_df) > 0:
-                    # For business data, check name and address
-                    if 'Names' in new_data and 'Address' in new_data:
-                        duplicate = existing_df[
-                            (existing_df['Names'] == new_data['Names']) & 
-                            (existing_df['Address'] == new_data['Address'])
-                        ]
-                        if len(duplicate) > 0:
-                            self.logger.info(f"Skipping duplicate: {new_data.get('Names', 'Unknown')}")
-                            return False
-                    
-                    # For review data, check place_id and reviewer_name combination
-                    elif 'place_id' in new_data and 'reviewer_name' in new_data:
-                        duplicate = existing_df[
-                            (existing_df['place_id'] == new_data['place_id']) & 
-                            (existing_df['reviewer_name'] == new_data['reviewer_name']) &
-                            (existing_df['review_text'] == new_data['review_text'])
-                        ]
-                        if len(duplicate) > 0:
-                            return False
-            
-            # Append to existing file
-            df = pd.DataFrame([new_data])
+
+            existing_df = pd.read_csv(filename)
+
+            # Ensure legacy files are upgraded to the new schema before appending
+            existing_df = self._ensure_business_schema(existing_df, expected_columns, filename)
+
+            if check_duplicates and len(existing_df) > 0:
+                if 'Names' in new_data and 'Address' in new_data:
+                    duplicate = existing_df[
+                        (existing_df.get('Names') == new_data['Names']) &
+                        (existing_df.get('Address') == new_data['Address'])
+                    ]
+                    if len(duplicate) > 0:
+                        self.logger.info(f"Skipping duplicate: {new_data.get('Names', 'Unknown')}")
+                        return False
+
+                elif 'place_id' in new_data and 'reviewer_name' in new_data:
+                    duplicate = existing_df[
+                        (existing_df.get('place_id') == new_data['place_id']) &
+                        (existing_df.get('reviewer_name') == new_data['reviewer_name']) &
+                        (existing_df.get('review_text') == new_data['review_text'])
+                    ]
+                    if len(duplicate) > 0:
+                        return False
+
+            # Append to existing file with aligned header order
+            df = pd.DataFrame([new_data], columns=expected_columns)
             df.to_csv(filename, mode='a', header=False, index=False)
             return True
-            
+
         except Exception as e:
             raise PersistenceException(f"Failed to append to {filename}: {e}") from e
+
+    def _ensure_business_schema(self, df: pd.DataFrame, expected_columns: list[str], filename: str) -> pd.DataFrame:
+        """Upgrade legacy CSV files to match the current business schema."""
+
+        if df.columns.tolist() == expected_columns:
+            return df
+
+        if 'Owner Name' not in expected_columns:
+            return df
+
+        upgraded_df = df.reindex(columns=expected_columns, fill_value="")
+        try:
+            upgraded_df.to_csv(filename, index=False)
+            self.logger.info("Upgraded business CSV schema to include owner enrichment columns")
+        except Exception as exc:
+            raise PersistenceException(f"Failed to upgrade business CSV schema: {exc}") from exc
+
+        return upgraded_df
     
     def backup_files(self) -> tuple[Optional[str], Optional[str]]:
         """Create timestamped backups of existing CSV files.
@@ -230,7 +248,9 @@ class CSVWriter:
             df = df.drop_duplicates(subset=['Names', 'Address'])
             
             # Remove columns with only one unique value (if any)
-            for column in df.columns:
+            for column in list(df.columns):
+                if column.startswith('Owner '):
+                    continue
                 if df[column].nunique() <= 1:
                     df.drop(column, axis=1, inplace=True)
             

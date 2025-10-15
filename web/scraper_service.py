@@ -18,22 +18,30 @@ sys.path.insert(0, str(parent_dir))
 
 from src.google_maps_scraper import GoogleMapsScraper, create_scraper_from_args
 from src.config import Config
+from src.services import OwnerCSVEnricher, OwnerCSVEnrichmentOptions
 from src.utils.exceptions import ScraperException
 
 
 @dataclass
 class JobConfig:
-    """Configuration for a scraping job."""
-    
-    search_term: str
-    total_results: int
+    """Configuration for a scraping or enrichment job."""
+
+    search_term: Optional[str] = None
+    total_results: Optional[int] = None
     bounds: Optional[Tuple[float, float, float, float]] = None
     grid_size: int = 2
     scraping_mode: str = 'fast'  # 'fast' (sequential) or 'coverage' (distributed)
     max_reviews: Optional[int] = None
     headless: bool = True
     config_overrides: Dict[str, Any] = None
-    
+    job_type: str = 'scrape'
+    owner_csv_path: Optional[str] = None
+    owner_output_path: Optional[str] = None
+    owner_in_place: bool = False
+    owner_resume: bool = False
+    owner_model: Optional[str] = None
+    owner_skip_existing: bool = True
+
     def __post_init__(self):
         if self.config_overrides is None:
             self.config_overrides = {}
@@ -140,17 +148,27 @@ class ScraperManager:
         job_id = str(uuid.uuid4())
         
         # Create job status
-        job_status = JobStatus(
-            job_id=job_id,
-            status='pending',
-            config=job_config,
-            progress={
+        if job_config.job_type == 'owner_enrichment':
+            progress_payload = {
+                'processed_rows': 0,
+                'total_rows': 0,
+                'owners_found': 0,
+                'percentage': 0,
+            }
+        else:
+            progress_payload = {
                 'current': 0,
                 'total': job_config.total_results,
                 'percentage': 0,
                 'cells_completed': 0,
                 'cells_total': 0
             }
+
+        job_status = JobStatus(
+            job_id=job_id,
+            status='pending',
+            config=job_config,
+            progress=progress_payload
         )
         
         with self.lock:
@@ -279,7 +297,11 @@ class ScraperManager:
             with self.lock:
                 job = self.jobs[job_id]
                 config = job.config
-            
+
+            if config.job_type == 'owner_enrichment':
+                self._run_owner_enrichment_job(job_id, config)
+                return
+
             # Create unique filenames for this job
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             results_file = f"result_{job_id}_{timestamp}.csv"
@@ -292,6 +314,13 @@ class ScraperManager:
             # Apply overrides
             if config.config_overrides:
                 for key, value in config.config_overrides.items():
+                    if key == 'owner_enrichment' and isinstance(value, dict):
+                        owner_settings = scraper_config.settings.owner_enrichment
+                        for sub_key, sub_value in value.items():
+                            if hasattr(owner_settings, sub_key):
+                                setattr(owner_settings, sub_key, sub_value)
+                        continue
+
                     if hasattr(scraper_config.settings, key):
                         setattr(scraper_config.settings, key, value)
             
@@ -368,6 +397,84 @@ class ScraperManager:
             with self.lock:
                 if job_id in self.active_threads:
                     del self.active_threads[job_id]
+
+    def _run_owner_enrichment_job(self, job_id: str, job_config: JobConfig) -> None:
+        csv_path = Path(job_config.owner_csv_path).expanduser()
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Owner enrichment CSV not found: {csv_path}")
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        if job_config.owner_output_path:
+            output_path = Path(job_config.owner_output_path).expanduser()
+        elif job_config.owner_in_place:
+            output_path = csv_path
+        else:
+            output_path = csv_path.with_name(f"{csv_path.stem}_owner_enriched_{timestamp}{csv_path.suffix}")
+
+        enrichment_config = Config()
+        if job_config.config_overrides:
+            for key, value in job_config.config_overrides.items():
+                if key == 'owner_enrichment' and isinstance(value, dict):
+                    owner_settings = enrichment_config.settings.owner_enrichment
+                    for sub_key, sub_value in value.items():
+                        if hasattr(owner_settings, sub_key):
+                            setattr(owner_settings, sub_key, sub_value)
+                    continue
+
+                if hasattr(enrichment_config.settings, key):
+                    setattr(enrichment_config.settings, key, value)
+
+        total_rows = max(self._count_rows(csv_path), 0)
+        self.update_job_progress(job_id, {
+            'total_rows': total_rows,
+            'processed_rows': 0,
+            'owners_found': 0,
+            'percentage': 0,
+        })
+
+        enricher = OwnerCSVEnricher(enrichment_config)
+
+        options = OwnerCSVEnrichmentOptions(
+            input_path=csv_path,
+            output_path=output_path if output_path != csv_path else None,
+            in_place=job_config.owner_in_place,
+            resume=job_config.owner_resume,
+            owner_model=job_config.owner_model,
+            skip_existing=job_config.owner_skip_existing,
+        )
+
+        def progress(stats: Dict[str, int]) -> None:
+            processed = stats.get('processed_rows', 0)
+            owners = stats.get('owners_found', 0)
+            percentage = 0
+            if total_rows:
+                percentage = min(100, (processed / total_rows) * 100)
+            self.update_job_progress(job_id, {
+                'processed_rows': processed,
+                'owners_found': owners,
+                'percentage': percentage,
+            })
+
+        result = enricher.enrich(options, progress_callback=progress)
+
+        with self.lock:
+            job = self.jobs[job_id]
+            job.status = 'completed'
+            job.end_time = datetime.now().isoformat()
+            job.results_file = str(result.output_path) if result.output_path else str(output_path)
+            job.error_message = None
+            job.progress.update({
+                'processed_rows': result.processed_rows,
+                'owners_found': result.owners_found,
+                'total_rows': result.total_rows,
+                'percentage': 100,
+            })
+
+    def _count_rows(self, path: Path) -> int:
+        with path.open('r', encoding='utf-8', newline='') as fh:
+            # subtract header
+            return max(sum(1 for _ in fh) - 1, 0)
 
 
 # Global scraper manager instance

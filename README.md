@@ -17,6 +17,8 @@ This Python script utilizes the Playwright library to perform web scraping and d
 
 - Review Analysis: It extracts review counts and average ratings, providing insights into businesses' online reputation.
 
+- Owner Enrichment (optional): When enabled, the scraper visits each business website with Crawl4AI adaptive crawling, captures imprint/contact details, and asks a lightweight OpenRouter-hosted LLM to extract the legal owner or managing director.
+
 - Business Type Detection: The script identifies whether a business offers in-store shopping, in-store pickup, or delivery services.
 
 - Operating Hours: It extracts information about the business's operating hours.
@@ -44,16 +46,55 @@ This Python script utilizes the Playwright library to perform web scraping and d
 
 To use this script, follow these steps:
 
-1. Run the script with Python:
-    ```bash
-     python main.py -s "search term" -t total
-    ```
-    Write the name of the place/business in "search term" and a number in place of "total" to get the number of listings. If listings are less than the number provided it is because there are fewer listings than the number provided such as
+1. Run the modern entry point for structured scraping:
    ```bash
-     python main.py -s "Turkish Restaurants in Toronto Canada" -t 20
-    ```
+   python main_new.py -s "Turkish Restaurants in Toronto Canada" -t 20 --scraping-mode fast
+   ```
+   Use `--config` if you want to point at a custom YAML configuration file.
 
-3. The script will launch a browser, perform the search, and start scraping information. It will display the progress and save the results to a CSV file called result.csv.
+2. (Legacy) The original script is still available for backwards compatibility:
+   ```bash
+   python main.py -s "Turkish Restaurants in Toronto Canada" -t 20
+   ```
+   The browser will launch, perform the search, and export results to `result.csv`.
+
+3. Optional owner enrichment (after installing Crawl4AI locally):
+   ```bash
+   pip install "crawl4ai @ git+https://github.com/unclecode/crawl4ai.git"
+   crawl4ai install browser
+   export OPENROUTER_API_KEY=your-openrouter-key
+   python main_new.py -s "coffee shops berlin" -t 10 --owner-enrichment --owner-model google/gemini-2.0-flash-exp:free
+   ```
+   The resulting CSV will include additional owner columns such as `Owner Name`, `Owner Status`, and `Owner Source URL`.
+
+4. When using the web dashboard (`python web/app.py`), enable “Enrich owner details” in the form to pass overrides that activate the same workflow.
+
+### Enrich Existing CSVs
+
+Retrofit owner information into a legacy scrape without collecting fresh business data:
+
+```bash
+python main_new.py --owner-enrich-csv result.csv --owner-output result_owner_enriched.csv
+```
+
+Flags of note:
+
+- `--owner-in-place` overwrites the source file after creating a `.bak` backup.
+- `--owner-resume` continues a previous run that stopped partway (uses a sidecar state file).
+- `--owner-no-skip-existing` reprocesses rows that already contain an owner name.
+- `--owner-model` selects a specific OpenRouter model for the extraction pass.
+
+From the dashboard, use the “Enrich Existing CSV” card to launch the same process: supply the CSV path, optional output path, and toggle resume/in-place as needed. Progress (rows processed, owners found) surfaces alongside scrape jobs, and the enriched CSV appears in the results panel when the job finishes.
+
+- Install the new dependencies listed in `requirements.txt` (`crawl4ai`, `httpx`).
+- Prepare Crawl4AI locally:
+  - `pip install crawl4ai` (or install from GitHub for the latest release).
+  - `crawl4ai install browser` to download the playwright engine Crawl4AI relies on.
+- Provide credentials via environment variables:
+  - `OPENROUTER_API_KEY` – API key for OpenRouter (free-tier models recommended, e.g. `google/gemini-2.0-flash-exp:free`).
+  - Optionally `OPENROUTER_DEFAULT_MODEL` to change the default LLM globally.
+- Adjust `config.yaml` → `owner_enrichment` block to fine tune crawl depth, allowed models, retry limits, and logging.
+- From the CLI you can override per run with `--owner-enrichment`, `--owner-model`, and `--owner-max-pages`.
 ## Video Example:
 I've included an example of running the code below.
 

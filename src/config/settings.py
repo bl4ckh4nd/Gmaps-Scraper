@@ -49,6 +49,34 @@ class FileSettings:
     progress_filename: str = 'scraper_progress.json'
     log_format: str = '%(asctime)s [%(levelname)s] %(message)s'
 
+@dataclass
+class OwnerEnrichmentSettings:
+    """Configuration for adaptive owner enrichment workflow."""
+
+    enabled: bool = False
+    max_depth: int = 2
+    max_pages: int = 4
+    request_timeout_ms: int = 20000
+    query_terms: Tuple[str, ...] = (
+        "impressum",
+        "imprint",
+        "owner",
+        "contact",
+        "about us",
+        "ueber uns",
+        "geschaeftsfuehrer",
+    )
+    confidence_threshold: float = 0.75
+    saturation_threshold: float = 0.6
+    crawler_engine: str = "adaptive"
+    crawler_browser_channel: Optional[str] = None
+    openrouter_api_key_env: str = "OPENROUTER_API_KEY"
+    openrouter_default_model: str = "google/gemini-2.0-flash-exp:free"
+    allow_free_models_only: bool = True
+    max_llm_retries: int = 2
+    llm_response_format: str = "json_object"
+    log_prompts: bool = False
+
 
 @dataclass
 class ScraperSettings:
@@ -57,6 +85,7 @@ class ScraperSettings:
     scraping: ScrapingSettings = field(default_factory=ScrapingSettings)
     grid: GridSettings = field(default_factory=GridSettings)
     files: FileSettings = field(default_factory=FileSettings)
+    owner_enrichment: OwnerEnrichmentSettings = field(default_factory=OwnerEnrichmentSettings)
 
 
 class Config:
@@ -77,7 +106,7 @@ class Config:
             return default_config
         
         with open(config_file, 'r') as f:
-            config_data = yaml.safe_load(f)
+            config_data = yaml.safe_load(f) or {}
         
         settings = ScraperSettings()
         
@@ -127,6 +156,26 @@ class Config:
                 progress_filename=files_data.get('progress_filename', settings.files.progress_filename),
                 log_format=files_data.get('log_format', settings.files.log_format)
             )
+
+        if 'owner_enrichment' in config_data:
+            owner_data = config_data['owner_enrichment'] or {}
+            settings.owner_enrichment = OwnerEnrichmentSettings(
+                enabled=owner_data.get('enabled', settings.owner_enrichment.enabled),
+                max_depth=owner_data.get('max_depth', settings.owner_enrichment.max_depth),
+                max_pages=owner_data.get('max_pages', settings.owner_enrichment.max_pages),
+                request_timeout_ms=owner_data.get('request_timeout_ms', settings.owner_enrichment.request_timeout_ms),
+                query_terms=tuple(owner_data.get('query_terms', settings.owner_enrichment.query_terms)),
+                confidence_threshold=owner_data.get('confidence_threshold', settings.owner_enrichment.confidence_threshold),
+                saturation_threshold=owner_data.get('saturation_threshold', settings.owner_enrichment.saturation_threshold),
+                crawler_engine=owner_data.get('crawler_engine', settings.owner_enrichment.crawler_engine),
+                crawler_browser_channel=owner_data.get('crawler_browser_channel', settings.owner_enrichment.crawler_browser_channel),
+                openrouter_api_key_env=owner_data.get('openrouter_api_key_env', settings.owner_enrichment.openrouter_api_key_env),
+                openrouter_default_model=owner_data.get('openrouter_default_model', settings.owner_enrichment.openrouter_default_model),
+                allow_free_models_only=owner_data.get('allow_free_models_only', settings.owner_enrichment.allow_free_models_only),
+                max_llm_retries=owner_data.get('max_llm_retries', settings.owner_enrichment.max_llm_retries),
+                llm_response_format=owner_data.get('llm_response_format', settings.owner_enrichment.llm_response_format),
+                log_prompts=owner_data.get('log_prompts', settings.owner_enrichment.log_prompts),
+            )
         
         return cls(settings)
     
@@ -147,6 +196,20 @@ class Config:
         if os.getenv('MAX_REVIEWS_PER_BUSINESS'):
             settings.scraping.max_reviews_per_business = int(os.getenv('MAX_REVIEWS_PER_BUSINESS'))
         
+        # Owner enrichment overrides
+        if os.getenv('OWNER_ENRICHMENT_ENABLED'):
+            settings.owner_enrichment.enabled = os.getenv('OWNER_ENRICHMENT_ENABLED').lower() == 'true'
+        if os.getenv('OWNER_ENRICHMENT_MAX_PAGES'):
+            settings.owner_enrichment.max_pages = int(os.getenv('OWNER_ENRICHMENT_MAX_PAGES'))
+        if os.getenv('OWNER_ENRICHMENT_MAX_DEPTH'):
+            settings.owner_enrichment.max_depth = int(os.getenv('OWNER_ENRICHMENT_MAX_DEPTH'))
+        if os.getenv('OWNER_ENRICHMENT_CONFIDENCE_THRESHOLD'):
+            settings.owner_enrichment.confidence_threshold = float(os.getenv('OWNER_ENRICHMENT_CONFIDENCE_THRESHOLD'))
+        if os.getenv('OPENROUTER_DEFAULT_MODEL'):
+            settings.owner_enrichment.openrouter_default_model = os.getenv('OPENROUTER_DEFAULT_MODEL')
+        if os.getenv('OWNER_ENRICHMENT_ALLOW_FREE_ONLY'):
+            settings.owner_enrichment.allow_free_models_only = os.getenv('OWNER_ENRICHMENT_ALLOW_FREE_ONLY').lower() == 'true'
+
         return cls(settings)
     
     def save_to_file(self, config_path: str) -> None:
@@ -181,8 +244,25 @@ class Config:
                 'reviews_filename': self.settings.files.reviews_filename,
                 'progress_filename': self.settings.files.progress_filename,
                 'log_format': self.settings.files.log_format
+            },
+            'owner_enrichment': {
+                'enabled': self.settings.owner_enrichment.enabled,
+                'max_depth': self.settings.owner_enrichment.max_depth,
+                'max_pages': self.settings.owner_enrichment.max_pages,
+                'request_timeout_ms': self.settings.owner_enrichment.request_timeout_ms,
+                'query_terms': list(self.settings.owner_enrichment.query_terms),
+                'confidence_threshold': self.settings.owner_enrichment.confidence_threshold,
+                'saturation_threshold': self.settings.owner_enrichment.saturation_threshold,
+                'crawler_engine': self.settings.owner_enrichment.crawler_engine,
+                'crawler_browser_channel': self.settings.owner_enrichment.crawler_browser_channel,
+                'openrouter_api_key_env': self.settings.owner_enrichment.openrouter_api_key_env,
+                'openrouter_default_model': self.settings.owner_enrichment.openrouter_default_model,
+                'allow_free_models_only': self.settings.owner_enrichment.allow_free_models_only,
+                'max_llm_retries': self.settings.owner_enrichment.max_llm_retries,
+                'llm_response_format': self.settings.owner_enrichment.llm_response_format,
+                'log_prompts': self.settings.owner_enrichment.log_prompts,
             }
         }
-        
+
         with open(config_path, 'w') as f:
             yaml.dump(config_data, f, default_flow_style=False, indent=2)

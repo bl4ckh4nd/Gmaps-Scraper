@@ -60,6 +60,34 @@ files:
   # Log message format
   log_format: '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
 
+# Owner Enrichment Settings
+owner_enrichment:
+  # Enable adaptive crawl + LLM owner extraction
+  enabled: false
+  # Crawl strategy controls
+  max_depth: 2
+  max_pages: 4
+  request_timeout_ms: 20000
+  query_terms:
+    - 'impressum'
+    - 'imprint'
+    - 'owner'
+    - 'contact'
+    - 'about us'
+    - 'ueber uns'
+    - 'geschaeftsfuehrer'
+  confidence_threshold: 0.75
+  saturation_threshold: 0.6
+  crawler_engine: 'adaptive'
+  crawler_browser_channel: null
+  # OpenRouter LLM defaults
+  openrouter_api_key_env: 'OPENROUTER_API_KEY'
+  openrouter_default_model: 'google/gemini-2.0-flash-exp:free'
+  allow_free_models_only: true
+  max_llm_retries: 2
+  llm_response_format: 'json_object'
+  log_prompts: false
+
 # Performance and Rate Limiting
 # Note: Adjust these values based on your needs and to avoid being rate-limited
 # Lower values are more respectful to Google's servers but slower

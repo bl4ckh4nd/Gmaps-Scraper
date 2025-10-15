@@ -24,6 +24,7 @@ function initializeApp() {
     
     // Set up form submission
     setupFormSubmission();
+    setupOwnerEnrichmentForm();
     
     // Load initial data
     loadJobs();
@@ -302,7 +303,14 @@ function validateFormData(data) {
     if (maxReviews && (maxReviews < 0 || maxReviews > 200)) {
         return { valid: false, message: 'Max reviews must be between 0 and 200' };
     }
-    
+
+    if (data.owner_enrichment === 'on' && data.owner_max_pages) {
+        const ownerMaxPages = parseInt(data.owner_max_pages);
+        if (!ownerMaxPages || ownerMaxPages < 1 || ownerMaxPages > 10) {
+            return { valid: false, message: 'Owner crawl pages must be between 1 and 10' };
+        }
+    }
+
     // Validate bounds area if selected
     if (boundsRectangle) {
         const bounds = boundsRectangle.getBounds();
@@ -328,9 +336,12 @@ function prepareJobConfig(data) {
         search_term: data.search_term.trim(),
         total_results: parseInt(data.total_results),
         grid_size: parseInt(data.grid_size),
-        headless: data.headless === 'on'
+        headless: data.headless === 'on',
+        scraping_mode: data.scraping_mode || 'fast'
     };
-    
+
+    config.job_type = 'scrape';
+
     // Add max reviews if specified
     if (data.max_reviews && parseInt(data.max_reviews) > 0) {
         config.max_reviews = parseInt(data.max_reviews);
@@ -353,8 +364,111 @@ function prepareJobConfig(data) {
             Math.max(west, east)     // max_lng
         ];
     }
-    
+
+    const overrides = {};
+    if (data.owner_enrichment === 'on') {
+        const ownerOverrides = { enabled: true };
+        if (data.owner_model && data.owner_model.trim().length > 0) {
+            ownerOverrides.openrouter_default_model = data.owner_model.trim();
+        }
+        if (data.owner_max_pages) {
+            ownerOverrides.max_pages = parseInt(data.owner_max_pages);
+        }
+        overrides.owner_enrichment = ownerOverrides;
+    }
+
+    if (Object.keys(overrides).length > 0) {
+        config.config_overrides = overrides;
+    }
+
     return config;
+}
+
+function setupOwnerEnrichmentForm() {
+    const form = document.getElementById('owner-enrichment-form');
+    if (!form) return;
+    form.addEventListener('submit', handleOwnerEnrichmentSubmit);
+}
+
+async function handleOwnerEnrichmentSubmit(e) {
+    e.preventDefault();
+
+    const form = e.target;
+    const formData = new FormData(form);
+    const data = Object.fromEntries(formData.entries());
+    data.owner_in_place = document.getElementById('owner-in-place').checked;
+    data.owner_resume = document.getElementById('owner-resume').checked;
+    data.owner_skip_existing = document.getElementById('owner-skip-existing').checked;
+
+    const validation = validateOwnerEnrichmentData(data);
+    if (!validation.valid) {
+        showToast(validation.message, 'error');
+        return;
+    }
+
+    const jobConfig = prepareOwnerEnrichmentJob(data);
+
+    try {
+        showLoadingOverlay('Starting owner enrichment job...');
+
+        const response = await fetch('/api/jobs', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(jobConfig)
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            showToast('Owner enrichment job started successfully!', 'success');
+            form.reset();
+            setTimeout(() => {
+                loadJobs();
+                updateHeaderStats();
+            }, 1000);
+        } else {
+            throw new Error(result.error || 'Failed to start owner enrichment job');
+        }
+    } catch (error) {
+        console.error('Error starting owner enrichment job:', error);
+        showToast(error.message || 'Failed to start owner enrichment job', 'error');
+    } finally {
+        hideLoadingOverlay();
+    }
+}
+
+function validateOwnerEnrichmentData(data) {
+    if (!data.owner_csv_path || data.owner_csv_path.trim().length === 0) {
+        return { valid: false, message: 'Input CSV path is required' };
+    }
+
+    if (data.owner_in_place && data.owner_output_path && data.owner_output_path.trim().length > 0) {
+        return { valid: false, message: 'Cannot use in-place mode and a custom output path together' };
+    }
+
+    return { valid: true };
+}
+
+function prepareOwnerEnrichmentJob(data) {
+    const job = {
+        job_type: 'owner_enrichment',
+        owner_csv_path: data.owner_csv_path.trim(),
+        owner_in_place: !!data.owner_in_place,
+        owner_resume: !!data.owner_resume,
+        owner_skip_existing: !!data.owner_skip_existing
+    };
+
+    if (data.owner_output_path && data.owner_output_path.trim().length > 0) {
+        job.owner_output_path = data.owner_output_path.trim();
+    }
+
+    if (data.owner_model && data.owner_model.trim().length > 0) {
+        job.owner_model = data.owner_model.trim();
+    }
+
+    return job;
 }
 
 // Job management
@@ -419,57 +533,69 @@ function displayCompletedJobs(jobs) {
 function createJobElement(job, isActive = false) {
     const statusClass = getStatusClass(job.status);
     const statusIcon = getStatusIcon(job.status);
-    const progress = job.progress;
-    const percentage = Math.round(progress.percentage);
-    
-    return `
-        <div class="job-item" data-job-id="${job.job_id}">
-            <div class="job-header">
-                <h3 class="job-title">${job.config.search_term}</h3>
-                <div class="status-badge ${statusClass}">
-                    <i class="fas ${statusIcon}"></i>
-                    ${job.status.toUpperCase()}
+    const progress = job.progress || {};
+    const isOwnerJob = job.config.job_type === 'owner_enrichment';
+    const percentage = Math.round(progress.percentage || 0);
+
+    const title = isOwnerJob
+        ? `Owner enrichment: ${job.config.owner_csv_path || 'Job'}`
+        : job.config.search_term;
+
+    const progressValue = (() => {
+        if (isOwnerJob) {
+            const processed = progress.processed_rows || 0;
+            const total = progress.total_rows || 0;
+            return `${processed} / ${total} (${percentage}%)`;
+        }
+        const current = progress.current || 0;
+        const total = progress.total || 0;
+        return `${current} / ${total} (${percentage}%)`;
+    })();
+
+    const progressBar = isActive
+        ? `
+            <div class="job-progress">
+                <div class="progress-label">
+                    <span>Progress</span>
+                    <span>${progressValue}</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${percentage}%"></div>
                 </div>
             </div>
-            
-            <div class="job-meta">
-                <div class="job-id">
-                    <strong>ID:</strong> 
-                    <code>${job.job_id.substring(0, 8)}...</code>
+          `
+        : '';
+
+    const statsMarkup = isOwnerJob
+        ? `
+            <div class="job-stats">
+                <div class="stat-item">
+                    <i class="fas fa-list"></i>
+                    <span class="stat-value">${(progress.total_rows || 0).toLocaleString()}</span>
+                    <span class="stat-label">Rows</span>
                 </div>
-                <div class="time-info">
-                    <i class="fas fa-clock"></i>
-                    <span>${job.elapsed_time}</span>
+                <div class="stat-item">
+                    <i class="fas fa-check"></i>
+                    <span class="stat-value">${(progress.processed_rows || 0).toLocaleString()}</span>
+                    <span class="stat-label">Processed</span>
                 </div>
-                ${job.estimated_remaining && isActive ? `
-                    <div class="time-info">
-                        <i class="fas fa-hourglass-half"></i>
-                        <span>~${job.estimated_remaining}</span>
-                    </div>
-                ` : ''}
+                <div class="stat-item">
+                    <i class="fas fa-user-tie"></i>
+                    <span class="stat-value">${(progress.owners_found || 0).toLocaleString()}</span>
+                    <span class="stat-label">Owners Found</span>
+                </div>
             </div>
-            
-            ${isActive ? `
-                <div class="job-progress">
-                    <div class="progress-label">
-                        <span>Progress</span>
-                        <span>${progress.current} / ${progress.total} (${percentage}%)</span>
-                    </div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" style="width: ${percentage}%"></div>
-                    </div>
-                </div>
-            ` : ''}
-            
+        `
+        : `
             <div class="job-stats">
                 <div class="stat-item">
                     <i class="fas fa-target"></i>
-                    <span class="stat-value">${progress.total.toLocaleString()}</span>
+                    <span class="stat-value">${(progress.total || 0).toLocaleString()}</span>
                     <span class="stat-label">Target</span>
                 </div>
                 <div class="stat-item">
                     <i class="fas fa-check"></i>
-                    <span class="stat-value">${progress.current.toLocaleString()}</span>
+                    <span class="stat-value">${(progress.current || 0).toLocaleString()}</span>
                     <span class="stat-label">Collected</span>
                 </div>
                 <div class="stat-item">
@@ -490,31 +616,64 @@ function createJobElement(job, isActive = false) {
                     </div>
                 ` : ''}
             </div>
-            
-            ${job.progress.cell_distribution && Object.keys(job.progress.cell_distribution).length > 0 ? `
-                <div class="cell-distribution">
-                    <small class="distribution-summary">
-                        <strong>Cell Coverage:</strong> 
-                        ${job.progress.cell_distribution.cells_with_results}/${job.progress.cell_distribution.total_cells_expected} cells used
-                        ${job.progress.cell_distribution.avg_per_cell > 0 ? `
-                            | Avg: ${Math.round(job.progress.cell_distribution.avg_per_cell)}/cell
-                            | Range: ${job.progress.cell_distribution.min_per_cell}-${job.progress.cell_distribution.max_per_cell}
-                        ` : ''}
-                    </small>
+        `;
+
+    const ownerExtras = isOwnerJob ? '' : (
+        job.progress.cell_distribution && Object.keys(job.progress.cell_distribution).length > 0 ? `
+            <div class="cell-distribution">
+                <small class="distribution-summary">
+                    <strong>Cell Coverage:</strong>
+                    ${job.progress.cell_distribution.cells_with_results}/${job.progress.cell_distribution.total_cells_expected} cells used
+                    ${job.progress.cell_distribution.avg_per_cell > 0 ? `
+                        | Avg: ${Math.round(job.progress.cell_distribution.avg_per_cell)}/cell
+                        | Range: ${job.progress.cell_distribution.min_per_cell}-${job.progress.cell_distribution.max_per_cell}
+                    ` : ''}
+                </small>
+            </div>
+        ` : ''
+    );
+
+    return `
+        <div class="job-item" data-job-id="${job.job_id}">
+            <div class="job-header">
+                <h3 class="job-title">${title}</h3>
+                <div class="status-badge ${statusClass}">
+                    <i class="fas ${statusIcon}"></i>
+                    ${job.status.toUpperCase()}
                 </div>
-            ` : ''}
-            
+            </div>
+
+            <div class="job-meta">
+                <div class="job-id">
+                    <strong>ID:</strong>
+                    <code>${job.job_id.substring(0, 8)}...</code>
+                </div>
+                <div class="time-info">
+                    <i class="fas fa-clock"></i>
+                    <span>${job.elapsed_time}</span>
+                </div>
+                ${job.estimated_remaining && isActive ? `
+                    <div class="time-info">
+                        <i class="fas fa-hourglass-half"></i>
+                        <span>~${job.estimated_remaining}</span>
+                    </div>
+                ` : ''}
+            </div>
+
+            ${progressBar}
+
+            ${statsMarkup}
+            ${ownerExtras}
+
             <div class="job-actions">
                 <a href="/jobs/${job.job_id}" class="btn btn-primary btn-sm">
                     <i class="fas fa-info-circle"></i> Details
                 </a>
-                
                 ${job.status === 'completed' ? `
                     <button onclick="downloadResults('${job.job_id}')" class="btn btn-success btn-sm">
                         <i class="fas fa-download"></i> Download
                     </button>
                 ` : ''}
-                
                 ${(job.status === 'running' || job.status === 'pending') ? `
                     <button onclick="cancelJob('${job.job_id}')" class="btn btn-danger btn-sm">
                         <i class="fas fa-stop"></i> Cancel

@@ -1,9 +1,12 @@
 """Business data model for Google Maps scraper."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional, Dict, Any
 import csv
 import io
+
+from .owner_enrichment import OwnerDetails
 
 
 @dataclass
@@ -28,6 +31,7 @@ class Business:
     reply_rate_good: float = 0.0
     reply_rate_bad: float = 0.0
     avg_time_between_reviews: Optional[float] = None
+    owner_details: OwnerDetails = field(default_factory=OwnerDetails)
     
     def __post_init__(self):
         """Validate and clean data after initialization."""
@@ -76,7 +80,14 @@ class Business:
             'Maps URL': self.maps_url,
             'Reply Rate Good (%)': self.reply_rate_good,
             'Reply Rate Bad (%)': self.reply_rate_bad,
-            'Avg Days Between Reviews': self.avg_time_between_reviews
+            'Avg Days Between Reviews': self.avg_time_between_reviews,
+            'Owner Name': self.owner_details.owner_name or "",
+            'Owner Status': self.owner_details.status,
+            'Owner Confidence': self.owner_details.confidence if self.owner_details.confidence is not None else "",
+            'Owner Source URL': self.owner_details.source_url or "",
+            'Owner Last Checked': self.owner_details.last_checked.isoformat() if self.owner_details.last_checked else "",
+            'Owner LLM Model': self.owner_details.llm_model or "",
+            'Owner Reason': self.owner_details.reason or "",
         }
     
     def to_csv_row(self) -> str:
@@ -117,7 +128,8 @@ class Business:
             maps_url=data.get('Maps URL', ''),
             reply_rate_good=float(data.get('Reply Rate Good (%)', 0.0)),
             reply_rate_bad=float(data.get('Reply Rate Bad (%)', 0.0)),
-            avg_time_between_reviews=float(data.get('Avg Days Between Reviews', 0)) if data.get('Avg Days Between Reviews') else None
+            avg_time_between_reviews=float(data.get('Avg Days Between Reviews', 0)) if data.get('Avg Days Between Reviews') else None,
+            owner_details=_owner_details_from_dict(data)
         )
     
     def is_duplicate_of(self, other: 'Business') -> bool:
@@ -139,3 +151,23 @@ class Business:
             self.in_store_pickup = "Yes"
         elif 'delivery' in info_lower:
             self.store_delivery = "Yes"
+
+
+def _owner_details_from_dict(data: Dict[str, Any]) -> OwnerDetails:
+    details = OwnerDetails(
+        owner_name=data.get('Owner Name') or None,
+        status=data.get('Owner Status') or 'not_requested',
+        confidence=float(data['Owner Confidence']) if data.get('Owner Confidence') not in (None, "") else None,
+        source_url=data.get('Owner Source URL') or None,
+        llm_model=data.get('Owner LLM Model') or None,
+        reason=data.get('Owner Reason') or None,
+    )
+
+    last_checked = data.get('Owner Last Checked')
+    if last_checked:
+        try:
+            details.last_checked = datetime.fromisoformat(str(last_checked))
+        except ValueError:
+            details.last_checked = None
+
+    return details
