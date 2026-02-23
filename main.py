@@ -1,3 +1,12 @@
+"""Legacy Google Maps scraper entrypoint.
+
+This script represents the original, monolithic implementation and is kept
+only for backwards compatibility with older workflows. For all new scraping
+jobs, prefer using `main_new.py`, which integrates with the modular
+architecture in `src/` (orchestrator, navigation, persistence, owner
+enrichment, etc.).
+"""
+
 import json
 import os
 from playwright.sync_api import sync_playwright

@@ -83,6 +83,7 @@ owner_enrichment:
   # OpenRouter LLM defaults
   openrouter_api_key_env: 'OPENROUTER_API_KEY'
   openrouter_default_model: 'google/gemini-2.0-flash-exp:free'
+  # Compatibility flag; explicit model choice is always honored.
   allow_free_models_only: true
   max_llm_retries: 2
   llm_response_format: 'json_object'

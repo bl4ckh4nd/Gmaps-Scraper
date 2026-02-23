@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence, TYPE_CHECKING
 
 from ..config import OwnerEnrichmentSettings
-from ..models import Business, OwnerDetails
-from ..scraper import AdaptiveOwnerEnricher, AdaptiveOwnerEnricherError
+from ..models import Business, OwnerDetails, OwnerDocument
 from .openrouter_client import (
     OpenRouterClient,
     OpenRouterClientError,
     extract_owner_name_from_response,
 )
-from .text_filters import extract_owner_snippets
+from .text_filters import extract_owner_snippets_with_sources
+
+if TYPE_CHECKING:
+    from ..scraper.adaptive_owner_enricher import AdaptiveOwnerEnricher
 
 
 class OwnerEnrichmentService:
@@ -24,12 +26,12 @@ class OwnerEnrichmentService:
         settings: OwnerEnrichmentSettings,
         *,
         logger: Optional[logging.Logger] = None,
-        enricher_factory: Optional[Callable[[OwnerEnrichmentSettings], AdaptiveOwnerEnricher]] = None,
+        enricher_factory: Optional[Callable[[OwnerEnrichmentSettings], "AdaptiveOwnerEnricher"]] = None,
     ) -> None:
         self.settings = settings
         self.logger = logger or logging.getLogger(__name__)
-        self._enricher_factory = enricher_factory or (lambda cfg: AdaptiveOwnerEnricher(cfg))
-        self._adaptive_enricher: Optional[AdaptiveOwnerEnricher] = None
+        self._enricher_factory = enricher_factory or self._default_enricher_factory
+        self._adaptive_enricher: Optional["AdaptiveOwnerEnricher"] = None
         self._openrouter_client: Optional[OpenRouterClient] = None
 
     def is_enabled(self) -> bool:
@@ -44,7 +46,7 @@ class OwnerEnrichmentService:
 
         try:
             enricher = self._get_enricher()
-        except AdaptiveOwnerEnricherError as exc:
+        except Exception as exc:
             self.logger.error("Owner crawl failed for %s: %s", business.website, exc)
             return OwnerDetails.from_response(
                 None,
@@ -54,7 +56,7 @@ class OwnerEnrichmentService:
 
         try:
             crawl_result = enricher.crawl_owner_content_sync(business.website)
-        except AdaptiveOwnerEnricherError as exc:
+        except Exception as exc:
             self.logger.error("Owner crawl failed for %s: %s", business.website, exc)
             return OwnerDetails.from_response(
                 None,
@@ -78,7 +80,7 @@ class OwnerEnrichmentService:
                 debug_payload=crawl_result.to_dict(),
             )
 
-        text_snippet = extract_owner_snippets(crawl_result.documents)
+        text_snippet, evidence_documents = extract_owner_snippets_with_sources(crawl_result.documents)
         if not text_snippet:
             return OwnerDetails.from_response(
                 None,
@@ -134,17 +136,17 @@ class OwnerEnrichmentService:
                 },
             )
 
-        best_document = max(
-            (doc for doc in crawl_result.documents if doc.content),
-            key=lambda d: d.confidence or 0.0,
-            default=crawl_result.documents[0],
+        best_document = self._select_source_document(
+            owner_name.strip(),
+            evidence_documents=evidence_documents,
+            fallback_documents=crawl_result.documents,
         )
 
         return OwnerDetails.from_response(
             owner_name.strip(),
             status="owner_found",
-            confidence=best_document.confidence,
-            source_url=best_document.url,
+            confidence=best_document.confidence if best_document else None,
+            source_url=best_document.url if best_document else None,
             llm_model=client.default_model,
             debug_payload={
                 "llm_response": response if self.settings.log_prompts else {},
@@ -166,11 +168,6 @@ class OwnerEnrichmentService:
             self.logger.error("Failed to initialise OpenRouter client: %s", exc)
             return None
 
-        if self.settings.allow_free_models_only and client.default_model and not client.default_model.endswith(":free"):
-            self.logger.warning(
-                "Configured OpenRouter model %s is not marked as free",
-                client.default_model,
-            )
         self._openrouter_client = client
         return client
 
@@ -197,18 +194,48 @@ class OwnerEnrichmentService:
             {"role": "user", "content": user_prompt},
         ]
 
-    def _get_enricher(self) -> AdaptiveOwnerEnricher:
+    def _get_enricher(self) -> "AdaptiveOwnerEnricher":
         if self._adaptive_enricher:
             return self._adaptive_enricher
 
         try:
             self._adaptive_enricher = self._enricher_factory(self.settings)
-        except AdaptiveOwnerEnricherError:
-            raise
         except Exception as exc:
-            raise AdaptiveOwnerEnricherError(str(exc)) from exc
+            raise RuntimeError(str(exc)) from exc
 
         return self._adaptive_enricher
+
+    @staticmethod
+    def _default_enricher_factory(settings: OwnerEnrichmentSettings) -> "AdaptiveOwnerEnricher":
+        from ..scraper.adaptive_owner_enricher import AdaptiveOwnerEnricher
+
+        return AdaptiveOwnerEnricher(settings)
+
+    def _select_source_document(
+        self,
+        owner_name: str,
+        *,
+        evidence_documents: Sequence[OwnerDocument],
+        fallback_documents: Sequence[OwnerDocument],
+    ) -> Optional[OwnerDocument]:
+        owner_name_lower = owner_name.lower()
+
+        matching_evidence = [
+            doc for doc in evidence_documents
+            if doc.content and owner_name_lower in doc.content.lower()
+        ]
+        if matching_evidence:
+            return max(matching_evidence, key=lambda d: d.confidence or 0.0)
+
+        evidence_with_content = [doc for doc in evidence_documents if doc.content]
+        if evidence_with_content:
+            return max(evidence_with_content, key=lambda d: d.confidence or 0.0)
+
+        fallback_with_content = [doc for doc in fallback_documents if doc.content]
+        if fallback_with_content:
+            return max(fallback_with_content, key=lambda d: d.confidence or 0.0)
+
+        return fallback_documents[0] if fallback_documents else None
 
 
 def enrich_business_owner(

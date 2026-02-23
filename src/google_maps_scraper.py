@@ -1,12 +1,15 @@
 """Main Google Maps scraper orchestrator."""
 
+import os
+import subprocess
+import sys
 from typing import Tuple, Optional, List
 from playwright.sync_api import sync_playwright, Browser, Page
 import argparse
 import time
 
 from .config import Config, Selectors
-from .models import Business, Review
+from .models import Business, OwnerDetails, Review
 from .scraper import BusinessScraper, ReviewScraper
 from .navigation import GridNavigator, PageNavigator
 from .persistence import CSVWriter, ProgressTracker
@@ -15,16 +18,23 @@ from .utils import (
     ScraperException,
     NavigationException,
     ExtractionException,
-    OwnerEnrichmentService,
 )
+from .utils.owner_enrichment_service import OwnerEnrichmentService
 from .utils.logger import get_component_logger, ScraperLoggerAdapter, log_scraping_progress
 from .utils.review_analyzer import analyze_reviews
+from .utils.helpers import extract_place_id
 
 
 class GoogleMapsScraper:
     """Main scraper orchestrator that coordinates all components."""
     
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        log_level: Optional[str] = None,
+        log_file: Optional[str] = None,
+        configure_root_logger: bool = True,
+    ):
         """Initialize the Google Maps scraper.
         
         Args:
@@ -32,7 +42,15 @@ class GoogleMapsScraper:
         """
         self.config = config
         self.selectors = Selectors()
-        self.logger = setup_logging()
+        # Configure logging using config-provided format and optional overrides
+        files_settings = self.config.settings.files
+        effective_level = log_level or "INFO"
+        self.logger = setup_logging(
+            log_level=effective_level,
+            log_file=log_file,
+            log_format=files_settings.log_format,
+            configure_root=configure_root_logger,
+        )
         self.component_logger = get_component_logger('Orchestrator')
         
         # Initialize components
@@ -114,10 +132,7 @@ class GoogleMapsScraper:
     
     def _initialize_browser_components(self, playwright) -> None:
         """Initialize browser and related components."""
-        self.browser = playwright.chromium.launch(
-            executable_path=self.config.settings.browser.executable_path,
-            headless=self.config.settings.browser.headless
-        )
+        self.browser = self._launch_browser_with_fallback(playwright)
         self.page = self.browser.new_page()
         
         # Initialize browser-dependent components
@@ -130,6 +145,85 @@ class GoogleMapsScraper:
         self.page_navigator = PageNavigator(
             self.page, self.config.settings, self.selectors
         )
+
+    def _resolve_browser_executable_path(self) -> Optional[str]:
+        """Resolve a usable configured browser executable path, or None for Playwright default."""
+        configured_path = (self.config.settings.browser.executable_path or "").strip()
+
+        if configured_path and os.path.isfile(configured_path):
+            self.component_logger.debug(f"Using configured browser executable: {configured_path}")
+            return configured_path
+
+        if configured_path:
+            self.component_logger.warning(
+                "Configured browser executable not found: %s. Falling back to Playwright default.",
+                configured_path,
+            )
+
+        self.component_logger.info("Using Playwright-managed Chromium executable.")
+        return None
+
+    def _launch_browser_with_fallback(self, playwright) -> Browser:
+        """Launch browser with robust fallback across OS/browser binaries."""
+        base_options = {
+            "headless": self.config.settings.browser.headless,
+        }
+        resolved_executable = self._resolve_browser_executable_path()
+
+        attempts = []
+        if resolved_executable:
+            attempts.append(("configured_or_detected", {**base_options, "executable_path": resolved_executable}))
+        attempts.append(("playwright_default", dict(base_options)))
+
+        last_error: Optional[Exception] = None
+        for label, options in attempts:
+            try:
+                if label == "playwright_default":
+                    self.component_logger.info("Launching with Playwright-managed Chromium.")
+                return playwright.chromium.launch(**options)
+            except Exception as exc:
+                last_error = exc
+                # If bundled browser is missing, try installing once and retry this attempt.
+                if label == "playwright_default" and self._is_missing_browser_error(exc):
+                    self.component_logger.warning(
+                        "Playwright Chromium missing. Attempting automatic install and retry."
+                    )
+                    self._install_playwright_chromium()
+                    return playwright.chromium.launch(**options)
+
+                if label == "configured_or_detected":
+                    self.component_logger.warning(
+                        "Failed to launch browser using executable %s: %s. Falling back to Playwright default.",
+                        options.get("executable_path"),
+                        exc,
+                    )
+                else:
+                    self.component_logger.error("Failed to launch browser using Playwright default: %s", exc)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Browser launch failed without a captured error")
+
+    @staticmethod
+    def _is_missing_browser_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "executable doesn't exist" in message
+            or "please run the following command" in message
+            or "browser has not been found" in message
+        )
+
+    def _install_playwright_chromium(self) -> None:
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+        completed = subprocess.run(cmd, capture_output=True, text=True)
+        if completed.returncode != 0:
+            stderr_tail = (completed.stderr or "").strip()[-400:]
+            stdout_tail = (completed.stdout or "").strip()[-400:]
+            raise RuntimeError(
+                "Automatic Playwright Chromium install failed. "
+                f"stdout: {stdout_tail!r} stderr: {stderr_tail!r}"
+            )
+        self.component_logger.info("Playwright Chromium installed successfully.")
     
     def _process_grid_cells(self, grid_navigator: GridNavigator, 
                           progress, search_term: str, total_results: int,
@@ -216,13 +310,25 @@ class GoogleMapsScraper:
         listing_count = self.page_navigator.scroll_for_listings(remaining_target)
         cell_logger.info(f"Found {listing_count} listings in cell {cell.id}")
         
-        # Collect listing URLs
-        seen_urls = progress.get_seen_urls_set()
-        listing_urls = self.page_navigator.collect_listing_urls(seen_urls)
+        # Collect listing URLs, avoiding place IDs we've already seen
+        seen_place_ids = progress.get_seen_urls_set()
+        listing_urls = self.page_navigator.collect_listing_urls(seen_place_ids)
         
         if not listing_urls:
             cell_logger.warning(f"No listing URLs collected from cell {cell.id}")
             return
+
+        # Persist newly seen place IDs so resumed jobs can skip them
+        existing_ids = set(progress.seen_urls)
+        new_place_ids: List[str] = []
+        for url in listing_urls:
+            place_id = extract_place_id(url)
+            if place_id and place_id not in existing_ids:
+                existing_ids.add(place_id)
+                new_place_ids.append(place_id)
+
+        if new_place_ids:
+            self.progress_tracker.update_progress(seen_urls=new_place_ids)
         
         # Process each listing
         processed_count = 0
@@ -321,6 +427,11 @@ class GoogleMapsScraper:
                         owner_details.status,
                     )
                 except Exception as exc:
+                    business.owner_details = OwnerDetails.from_response(
+                        None,
+                        status="error",
+                        reason=str(exc),
+                    )
                     logger.warning(
                         "Owner enrichment failed for %s: %s",
                         business.name,
@@ -400,4 +511,6 @@ def create_scraper_from_args(args: argparse.Namespace) -> GoogleMapsScraper:
     if getattr(args, 'owner_max_pages', None):
         config.settings.owner_enrichment.max_pages = args.owner_max_pages
 
-    return GoogleMapsScraper(config)
+    log_level = getattr(args, "log_level", None)
+
+    return GoogleMapsScraper(config, log_level=log_level)

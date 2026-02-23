@@ -72,6 +72,7 @@ class OwnerEnrichmentSettings:
     crawler_browser_channel: Optional[str] = None
     openrouter_api_key_env: str = "OPENROUTER_API_KEY"
     openrouter_default_model: str = "google/gemini-2.0-flash-exp:free"
+    # Compatibility flag; explicit model overrides are still honored.
     allow_free_models_only: bool = True
     max_llm_retries: int = 2
     llm_response_format: str = "json_object"

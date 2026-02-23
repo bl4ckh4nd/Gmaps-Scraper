@@ -1,4 +1,6 @@
 import datetime
+import json
+import csv
 
 import pandas as pd
 import pytest
@@ -160,6 +162,32 @@ def test_extract_owner_name_from_response_handles_missing():
     assert extract_owner_name_from_response({"choices": []}) is None
 
 
+def test_extract_owner_name_from_response_parses_json_content():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"owner_name": "Jane Doe"}',
+                }
+            }
+        ]
+    }
+    assert extract_owner_name_from_response(response) == "Jane Doe"
+
+
+def test_extract_owner_name_from_response_ignores_non_owner_json():
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"result": "no owner listed"}',
+                }
+            }
+        ]
+    }
+    assert extract_owner_name_from_response(response) is None
+
+
 def test_filter_free_models_returns_free_entries():
     models = [
         {"id": "model-a:free", "pricing": {"prompt": 0, "completion": 0}},
@@ -285,3 +313,149 @@ def test_owner_csv_enricher_enriches_rows(tmp_path):
     assert enriched_df.iloc[0]['Owner Name'] == 'Ada Lovelace'
     assert result.owners_found == 1
     assert enricher._owner_service.calls == 1
+
+
+def test_owner_enrichment_service_prefers_source_matching_owner_name():
+    settings = OwnerEnrichmentSettings(enabled=True)
+    service = OwnerEnrichmentService(settings)
+    documents = [
+        OwnerDocument(
+            url="https://example.com/imprint",
+            content="Owner: Jane Doe\nManaging Director: Jane Doe",
+            confidence=0.40,
+        ),
+        OwnerDocument(
+            url="https://example.com/home",
+            content="Welcome to our homepage",
+            confidence=0.99,
+        ),
+    ]
+    service._adaptive_enricher = DummyEnricher(documents)
+    service._get_openrouter_client = lambda: DummyClient("Jane Doe")
+    business = Business(place_id="1", name="Test Biz", website="https://example.com")
+
+    details = service.enrich_business(business)
+
+    assert details.status == "owner_found"
+    assert details.source_url == "https://example.com/imprint"
+
+
+def test_owner_csv_enricher_rejects_in_place_resume(tmp_path):
+    csv_path = tmp_path / "result.csv"
+    pd.DataFrame([{"Place ID": "pid-1", "Names": "Biz", "Address": "", "Website": ""}]).to_csv(
+        csv_path,
+        index=False,
+    )
+
+    enricher = OwnerCSVEnricher(Config())
+    options = OwnerCSVEnrichmentOptions(
+        input_path=csv_path,
+        in_place=True,
+        resume=True,
+    )
+
+    with pytest.raises(ValueError, match="cannot be resumed safely"):
+        enricher.enrich(options)
+
+
+def test_owner_csv_enricher_resume_legacy_state_uses_row_checkpoint(tmp_path):
+    input_path = tmp_path / "input.csv"
+    output_path = tmp_path / "output.csv"
+    state_path = tmp_path / "output.csv.state.json"
+
+    rows = [
+        {
+            "Place ID": "pid-1",
+            "Names": "Coffee Hub",
+            "Address": "Main Street 1",
+            "Website": "https://coffeehub.example",
+            "Phone Number": "",
+            "Review Count": 0,
+            "Average Review": 0.0,
+            "Store Shopping": "No",
+            "In Store Pickup": "No",
+            "Delivery": "No",
+            "Type": "",
+            "Opens At": "",
+            "Introduction": "",
+            "Maps URL": "",
+            "Reply Rate Good (%)": 0.0,
+            "Reply Rate Bad (%)": 0.0,
+            "Avg Days Between Reviews": "",
+        },
+        {
+            "Place ID": "pid-1",
+            "Names": "Coffee Hub",
+            "Address": "Main Street 1",
+            "Website": "https://coffeehub.example",
+            "Phone Number": "",
+            "Review Count": 0,
+            "Average Review": 0.0,
+            "Store Shopping": "No",
+            "In Store Pickup": "No",
+            "Delivery": "No",
+            "Type": "",
+            "Opens At": "",
+            "Introduction": "",
+            "Maps URL": "",
+            "Reply Rate Good (%)": 0.0,
+            "Reply Rate Bad (%)": 0.0,
+            "Avg Days Between Reviews": "",
+        },
+        {
+            "Place ID": "pid-3",
+            "Names": "Bakery Point",
+            "Address": "Second Street 2",
+            "Website": "https://bakery.example",
+            "Phone Number": "",
+            "Review Count": 0,
+            "Average Review": 0.0,
+            "Store Shopping": "No",
+            "In Store Pickup": "No",
+            "Delivery": "No",
+            "Type": "",
+            "Opens At": "",
+            "Introduction": "",
+            "Maps URL": "",
+            "Reply Rate Good (%)": 0.0,
+            "Reply Rate Bad (%)": 0.0,
+            "Avg Days Between Reviews": "",
+        },
+    ]
+    pd.DataFrame(rows).to_csv(input_path, index=False)
+
+    # Simulate an interrupted prior run with one already-written output row.
+    first_business = Business.from_dict(rows[0])
+    first_business.owner_details = OwnerDetails.from_response(
+        "Ada Lovelace",
+        status="owner_found",
+        source_url="https://coffeehub.example",
+    )
+    with output_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(first_business.to_dict().keys()))
+        writer.writeheader()
+        writer.writerow(first_business.to_dict())
+
+    # Legacy state format from older signature-based implementation.
+    state_path.write_text(json.dumps({"processed": ["legacy-signature"]}), encoding="utf-8")
+
+    config = Config()
+    enricher = OwnerCSVEnricher(config)
+    enricher._owner_service = DummyOwnerService(owner_name="Grace Hopper")
+    options = OwnerCSVEnrichmentOptions(
+        input_path=input_path,
+        output_path=output_path,
+        resume=True,
+        state_path=state_path,
+        skip_existing=False,
+    )
+
+    result = enricher.enrich(options)
+
+    assert result.total_rows == 3
+    assert result.processed_rows == 2
+    assert enricher._owner_service.calls == 2
+    assert not state_path.exists()
+
+    enriched_df = pd.read_csv(output_path)
+    assert len(enriched_df) == 3

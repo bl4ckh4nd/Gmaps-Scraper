@@ -447,6 +447,9 @@ function validateOwnerEnrichmentData(data) {
     if (data.owner_in_place && data.owner_output_path && data.owner_output_path.trim().length > 0) {
         return { valid: false, message: 'Cannot use in-place mode and a custom output path together' };
     }
+    if (data.owner_in_place && data.owner_resume) {
+        return { valid: false, message: 'Cannot use in-place mode together with resume' };
+    }
 
     return { valid: true };
 }

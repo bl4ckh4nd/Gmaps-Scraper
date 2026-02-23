@@ -6,7 +6,9 @@ Extracts business information and reviews from Google Maps using geographic grid
 """
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -52,7 +54,7 @@ Configuration:
     # Optional arguments
     parser.add_argument(
         "-b", "--bounds", 
-        type=str, 
+        type=str,
         help="Search bounds as 'min_lat,min_lng,max_lat,max_lng' (optional)"
     )
     parser.add_argument(
@@ -69,8 +71,15 @@ Configuration:
     )
     parser.add_argument(
         "--headless", 
-        type=bool, 
-        help="Run browser in headless mode (overrides config)"
+        dest="headless",
+        action="store_true",
+        help="Run browser in headless mode (overrides config to True)"
+    )
+    parser.add_argument(
+        "--no-headless",
+        dest="headless",
+        action="store_false",
+        help="Run browser with UI (overrides config to False)"
     )
     parser.add_argument(
         "--max-reviews", 
@@ -80,9 +89,8 @@ Configuration:
     parser.add_argument(
         "--scraping-mode", 
         type=str,
-        choices=['fast', 'coverage'], 
-        default='fast',
-        help="Scraping mode: 'fast' (sequential) or 'coverage' (distributed) (default: fast)"
+        choices=['fast', 'coverage'],
+        help="Scraping mode: 'fast' (sequential) or 'coverage' (distributed). Overrides config default_mode."
     )
     parser.add_argument(
         "--log-level", 
@@ -90,6 +98,11 @@ Configuration:
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
         default='INFO',
         help="Logging level (default: INFO)"
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print effective configuration (after applying CLI overrides) and exit",
     )
     parser.add_argument(
         "--owner-enrichment",
@@ -126,7 +139,7 @@ Configuration:
         action="store_true",
         help="Resume a previously interrupted owner enrichment run"
     )
-    parser.set_defaults(owner_skip_existing=True)
+    parser.set_defaults(owner_skip_existing=True, headless=None)
     parser.add_argument(
         "--owner-no-skip-existing",
         dest="owner_skip_existing",
@@ -181,7 +194,14 @@ def validate_arguments(args: argparse.Namespace) -> None:
     Raises:
         ValueError: If arguments are invalid
     """
+    if getattr(args, 'owner_max_pages', None) is not None and args.owner_max_pages <= 0:
+        raise ValueError("Owner max pages must be positive")
+
     if getattr(args, 'owner_enrich_csv', None):
+        if args.owner_in_place and args.owner_output:
+            raise ValueError("--owner-in-place cannot be combined with --owner-output")
+        if args.owner_in_place and args.owner_resume:
+            raise ValueError("--owner-in-place cannot be combined with --owner-resume")
         return
 
     # Validate search term
@@ -202,8 +222,55 @@ def validate_arguments(args: argparse.Namespace) -> None:
     if args.max_reviews is not None and args.max_reviews < 0:
         raise ValueError("Max reviews cannot be negative")
 
-    if getattr(args, 'owner_max_pages', None) is not None and args.owner_max_pages <= 0:
-        raise ValueError("Owner max pages must be positive")
+
+def build_effective_config(args: argparse.Namespace) -> Config:
+    """Load configuration and apply CLI overrides without starting the scraper."""
+
+    config_path = getattr(args, "config", "config.yaml")
+    try:
+        config = Config.from_file(config_path)
+    except Exception:
+        config = Config()
+
+    settings = config.settings
+
+    # Apply the same overrides we support in the CLI
+    if getattr(args, "headless", None) is not None:
+        settings.browser.headless = args.headless
+
+    if getattr(args, "max_reviews", None):
+        settings.scraping.max_reviews_per_business = args.max_reviews
+
+    if getattr(args, "owner_enrichment", False):
+        settings.owner_enrichment.enabled = True
+
+    if getattr(args, "owner_model", None):
+        settings.owner_enrichment.openrouter_default_model = args.owner_model
+
+    if getattr(args, "owner_max_pages", None):
+        settings.owner_enrichment.max_pages = args.owner_max_pages
+
+    return config
+
+
+def print_effective_config(args: argparse.Namespace) -> None:
+    """Print the effective configuration after applying CLI overrides."""
+
+    config = build_effective_config(args)
+    settings_dict = asdict(config.settings)
+
+    # Compute effective scraping mode for this run
+    default_mode = settings_dict.get("scraping", {}).get("default_mode", "fast")
+    effective_mode = args.scraping_mode or default_mode
+    settings_dict.setdefault("scraping", {})["effective_mode_cli"] = effective_mode
+
+    print("=" * 60)
+    print("Google Maps Scraper - Effective Configuration")
+    print("=" * 60)
+    print(json.dumps(settings_dict, indent=2, default=str))
+    print("=" * 60)
+    print("Config file:", getattr(args, "config", "config.yaml"))
+    print("Effective scraping mode for this run:", effective_mode)
 
 
 def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
@@ -212,6 +279,15 @@ def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
     csv_path = Path(args.owner_enrich_csv).expanduser()
     if not csv_path.exists():
         raise FileNotFoundError(f"Owner enrichment CSV not found: {csv_path}")
+
+    # Pre-count total rows for stable progress reporting
+    total_rows = 0
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as fh:
+            # subtract header row
+            total_rows = max(sum(1 for _ in fh) - 1, 0)
+    except Exception:
+        total_rows = 0
 
     config_path = getattr(args, 'config', 'config.yaml')
     try:
@@ -222,6 +298,8 @@ def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
     output_path = Path(args.owner_output).expanduser() if args.owner_output else None
     if args.owner_in_place and output_path and output_path != csv_path:
         raise ValueError("--owner-in-place cannot be combined with --owner-output")
+    if args.owner_in_place and args.owner_resume:
+        raise ValueError("--owner-in-place cannot be combined with --owner-resume")
 
     options = OwnerCSVEnrichmentOptions(
         input_path=csv_path,
@@ -250,7 +328,7 @@ def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
     enricher = OwnerCSVEnricher(config)
 
     def progress(stats: Dict[str, int]) -> None:
-        total = stats.get("total_rows", 0) or total_rows
+        total = total_rows or stats.get("total_rows", 0)
         processed = stats.get("processed_rows", 0)
         owners = stats.get("owners_found", 0)
         print(
@@ -277,8 +355,15 @@ def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
 def main():
     """Main entry point for the Google Maps scraper."""
     try:
-        # Parse and validate arguments
+        # Parse arguments
         args = parse_arguments()
+
+        # Print configuration and exit if requested
+        if getattr(args, "print_config", False):
+            print_effective_config(args)
+            return
+
+        # Validate arguments for scraping / enrichment
         validate_arguments(args)
 
         if args.owner_enrich_csv:
@@ -292,6 +377,14 @@ def main():
         
         # Create and configure scraper
         scraper = create_scraper_from_args(args)
+
+        # Resolve scraping mode: CLI override wins, otherwise use config default
+        if getattr(args, "scraping_mode", None) is None:
+            args.scraping_mode = scraper.config.settings.scraping.default_mode
+        if args.scraping_mode not in ("fast", "coverage"):
+            raise ValueError(
+                f"Invalid scraping mode '{args.scraping_mode}'. Must be 'fast' or 'coverage'."
+            )
         
         # Display startup information
         print("="*60)

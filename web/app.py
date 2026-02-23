@@ -12,6 +12,11 @@ import logging
 from pathlib import Path
 
 from scraper_service import scraper_manager, JobConfig, JobStatus
+from src.config import Config
+from src.config.config_manager import ConfigurationManager
+from src.config.migration import run_migration_if_needed
+from src.services.browser_detector import BrowserDetector
+from src.services.system_validation import SystemValidationService
 
 # Configure Flask app
 app = Flask(__name__)
@@ -21,6 +26,50 @@ CORS(app)  # Enable CORS for all domains
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Initialize configuration manager
+yaml_path = Path(__file__).parent.parent / "config.yaml"
+db_path = Path(__file__).parent / "database" / "scraper.db"
+config_manager = ConfigurationManager(yaml_path, db_path)
+
+# Initialize services
+browser_detector = BrowserDetector()
+system_validator = SystemValidationService()
+
+
+# Middleware for onboarding check
+@app.before_request
+def check_onboarding():
+    """Redirect to onboarding if not completed."""
+    # Skip check for certain paths
+    skip_paths = [
+        '/onboarding',
+        '/api/onboarding/',
+        '/api/system/',
+        '/static/',
+        '/_debug'  # Flask debug toolbar
+    ]
+
+    # Check if current path should skip onboarding check
+    if any(request.path.startswith(path) for path in skip_paths):
+        return None
+
+    # Skip for all API routes (handled by endpoints themselves if needed)
+    if request.path.startswith('/api/'):
+        return None
+
+    # Check onboarding status
+    try:
+        if not config_manager.is_onboarding_completed():
+            # Redirect to onboarding page for web routes
+            if not request.path.startswith('/api/'):
+                from flask import redirect
+                return redirect('/onboarding')
+    except Exception as e:
+        logger.warning(f"Could not check onboarding status: {e}")
+        # Continue anyway to avoid breaking the app
+
+    return None
 
 
 # Error handlers
@@ -60,6 +109,8 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
             owner_in_place = bool(data.get('owner_in_place', False))
             if owner_in_place and output_path:
                 return None, "owner_in_place cannot be combined with owner_output_path"
+            if owner_in_place and bool(data.get('owner_resume', False)):
+                return None, "owner_in_place cannot be combined with owner_resume"
 
             config_overrides = data.get('config_overrides', {})
             if not isinstance(config_overrides, dict):
@@ -120,7 +171,13 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
         if not isinstance(headless, bool):
             return None, "headless must be a boolean"
 
-        scraping_mode = data.get('scraping_mode', 'fast')
+        scraping_mode = data.get('scraping_mode')
+        if scraping_mode is None:
+            try:
+                config = Config.from_file(str(Path(__file__).parent.parent / "config.yaml"))
+                scraping_mode = config.settings.scraping.default_mode
+            except Exception:
+                scraping_mode = 'fast'
         if scraping_mode not in ['fast', 'coverage']:
             return None, "scraping_mode must be 'fast' or 'coverage'"
 
@@ -158,6 +215,18 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
 
 
 # Web routes
+@app.route('/onboarding')
+def onboarding_page():
+    """Serve the onboarding wizard page."""
+    return render_template('onboarding.html')
+
+
+@app.route('/settings')
+def settings_page():
+    """Serve the settings page."""
+    return render_template('settings.html')
+
+
 @app.route('/')
 def index():
     """Serve the main dashboard."""
@@ -186,6 +255,234 @@ def health_check():
         'active_jobs': len(scraper_manager.get_active_jobs()),
         'total_jobs': len(scraper_manager.list_jobs())
     })
+
+
+# System endpoints
+@app.route('/api/system/status', methods=['GET'])
+def system_status():
+    """Get comprehensive system status including onboarding state."""
+    try:
+        system_settings = config_manager.get_system_settings_dict()
+
+        # Get current effective config
+        effective_config = config_manager.get_effective_config()
+        chrome_path = effective_config.settings.browser.executable_path
+
+        # Run system checks
+        checks = system_validator.run_system_checks(chrome_path if system_settings.get('chrome_configured') else None)
+
+        # Convert ValidationResult objects to dicts
+        checks_dict = {k: v.to_dict() for k, v in checks.items()}
+
+        return jsonify({
+            'onboarding_completed': system_settings.get('onboarding_completed', False),
+            'chrome_configured': bool(system_settings.get('chrome_path')),
+            'chrome_validated': system_settings.get('chrome_validated', False),
+            'chrome_version': checks_dict.get('chrome', {}).get('details', {}).get('version') if 'chrome' in checks_dict else None,
+            'api_key_configured': bool(system_settings.get('openrouter_api_key')),
+            'api_key_validated': system_settings.get('openrouter_validated', False),
+            'owner_enrichment_enabled': system_settings.get('owner_enrichment_enabled', False),
+            'system_checks': checks_dict
+        })
+
+    except Exception as e:
+        logger.error(f"System status check failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/system/validate-browser', methods=['POST'])
+def validate_browser():
+    """Validate a Chrome browser path."""
+    try:
+        data = request.get_json()
+        chrome_path = data.get('chrome_path', '').strip()
+
+        if not chrome_path:
+            return jsonify({'error': 'chrome_path is required'}), 400
+
+        # Validate the path
+        result = system_validator.validate_chrome(chrome_path)
+
+        return jsonify(result.to_dict())
+
+    except Exception as e:
+        logger.error(f"Browser validation failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/system/detect-browser', methods=['GET'])
+def detect_browser():
+    """Auto-detect Chrome browser installations."""
+    try:
+        candidates = browser_detector.detect_browsers()
+
+        # Convert to dicts
+        candidates_dict = [c.to_dict() for c in candidates]
+
+        # Get best candidate
+        best = browser_detector.get_best_candidate()
+        best_path = best.path if best else None
+
+        return jsonify({
+            'candidates': candidates_dict,
+            'best_candidate': best_path
+        })
+
+    except Exception as e:
+        logger.error(f"Browser detection failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/system/validate-api-key', methods=['POST'])
+def validate_api_key():
+    """Validate OpenRouter API key."""
+    try:
+        data = request.get_json()
+        api_key = data.get('api_key', '').strip()
+        model = data.get('model')
+
+        if not api_key:
+            return jsonify({'error': 'api_key is required'}), 400
+
+        # Validate the API key
+        result = system_validator.validate_openrouter_api_key(api_key, model)
+
+        return jsonify(result.to_dict())
+
+    except Exception as e:
+        logger.error(f"API key validation failed: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# Onboarding endpoints
+@app.route('/api/onboarding/status', methods=['GET'])
+def onboarding_status():
+    """Get onboarding status."""
+    try:
+        system_settings = config_manager.get_system_settings_dict()
+
+        return jsonify({
+            'onboarding_completed': system_settings.get('onboarding_completed', False),
+            'chrome_configured': bool(system_settings.get('chrome_path')),
+            'api_key_configured': bool(system_settings.get('openrouter_api_key'))
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to get onboarding status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/onboarding/complete', methods=['POST'])
+def complete_onboarding():
+    """Mark onboarding as completed."""
+    try:
+        config_manager.mark_onboarding_completed()
+
+        return jsonify({
+            'success': True,
+            'message': 'Onboarding completed successfully'
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to complete onboarding: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# Settings endpoints
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    """Get current settings."""
+    try:
+        system_settings = config_manager.get_system_settings_dict()
+        user_prefs = config_manager.get_user_preferences_dict()
+
+        # Don't include encrypted API key in response
+        if 'openrouter_api_key' in system_settings:
+            system_settings['openrouter_api_key'] = '***' if system_settings['openrouter_api_key'] else None
+
+        return jsonify({
+            'system_settings': system_settings,
+            'user_preferences': user_prefs
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to get settings: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/settings', methods=['PUT'])
+def update_settings():
+    """Update settings."""
+    try:
+        data = request.get_json()
+
+        # Update Chrome path if provided
+        if 'chrome_path' in data:
+            chrome_path = data['chrome_path'].strip()
+            validated = data.get('chrome_validated', False)
+            config_manager.save_chrome_path(chrome_path, validated)
+
+        # Update API key if provided
+        if 'api_key' in data:
+            api_key = data['api_key'].strip()
+            model = data.get('model')
+            validated = data.get('api_key_validated', False)
+            config_manager.save_api_key(api_key, model, validated)
+
+        # Update owner enrichment enabled
+        if 'owner_enrichment_enabled' in data:
+            enabled = bool(data['owner_enrichment_enabled'])
+            config_manager.save_owner_enrichment_enabled(enabled)
+
+        # Update user preferences
+        user_pref_updates = {}
+        if 'default_headless' in data:
+            user_pref_updates['default_headless'] = bool(data['default_headless'])
+        if 'default_grid_size' in data:
+            user_pref_updates['default_grid_size'] = int(data['default_grid_size'])
+        if 'default_scraping_mode' in data:
+            user_pref_updates['default_scraping_mode'] = data['default_scraping_mode']
+
+        if user_pref_updates:
+            config_manager.db_repo.update_user_preferences(user_pref_updates)
+
+        config_manager.invalidate_cache()
+
+        return jsonify({
+            'success': True,
+            'message': 'Settings updated successfully'
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to update settings: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/settings/test', methods=['POST'])
+def test_settings():
+    """Test settings without saving."""
+    try:
+        data = request.get_json()
+        results = {}
+
+        # Test Chrome path if provided
+        if 'chrome_path' in data:
+            chrome_path = data['chrome_path'].strip()
+            result = system_validator.validate_chrome(chrome_path)
+            results['chrome'] = result.to_dict()
+
+        # Test API key if provided
+        if 'api_key' in data:
+            api_key = data['api_key'].strip()
+            model = data.get('model')
+            result = system_validator.validate_openrouter_api_key(api_key, model)
+            results['api_key'] = result.to_dict()
+
+        return jsonify(results)
+
+    except Exception as e:
+        logger.error(f"Settings test failed: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/jobs', methods=['POST'])
@@ -443,11 +740,17 @@ def get_job_stats(job_id):
 @app.route('/api/config', methods=['GET'])
 def get_config():
     """Get default configuration values."""
+    try:
+        config = Config.from_file(str(Path(__file__).parent.parent / "config.yaml"))
+    except Exception:
+        config = Config()
+
+    settings = config.settings
     return jsonify({
-        'default_bounds': [43.6, -79.5, 43.9, -79.2],  # Toronto area
-        'default_grid_size': 2,
+        'default_bounds': list(settings.grid.default_bounds),
+        'default_grid_size': settings.grid.default_grid_size,
         'max_results': 10000,
-        'max_reviews': 200,
+        'max_reviews': settings.scraping.max_reviews_per_business,
         'supported_file_types': ['business_data', 'reviews_data', 'log_file']
     })
 
@@ -456,6 +759,14 @@ def get_config():
 def startup():
     """Run startup tasks."""
     logger.info("Google Maps Scraper Web Interface started")
+
+    # Run migration if needed (existing installations)
+    try:
+        run_migration_if_needed(yaml_path, db_path)
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
+        logger.warning("Manual configuration may be required")
+
     # Clean up old jobs on startup
     scraper_manager.cleanup_old_jobs(older_than_hours=48)
 
@@ -466,4 +777,7 @@ with app.app_context():
 
 if __name__ == '__main__':
     # Development server
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    debug_mode = os.getenv("FLASK_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+    host = os.getenv("FLASK_HOST", "0.0.0.0")
+    port = int(os.getenv("FLASK_PORT", "5000"))
+    app.run(debug=debug_mode, host=host, port=port, threaded=True)

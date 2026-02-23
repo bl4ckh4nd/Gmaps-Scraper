@@ -307,9 +307,14 @@ class ScraperManager:
             results_file = f"result_{job_id}_{timestamp}.csv"
             reviews_file = f"reviews_{job_id}_{timestamp}.csv"
             progress_file = f"progress_{job_id}_{timestamp}.json"
+            log_file = f"scraper_log_{job_id}_{timestamp}.log"
             
-            # Create scraper configuration
-            scraper_config = Config()
+            # Create scraper configuration based on shared YAML
+            config_path = parent_dir / "config.yaml"
+            try:
+                scraper_config = Config.from_file(str(config_path))
+            except Exception:
+                scraper_config = Config()
             
             # Apply overrides
             if config.config_overrides:
@@ -336,8 +341,13 @@ class ScraperManager:
             scraper_config.settings.files.reviews_filename = reviews_file
             scraper_config.settings.files.progress_filename = progress_file
             
-            # Create scraper instance
-            scraper = GoogleMapsScraper(scraper_config)
+            # Create scraper instance with job-specific log file; avoid
+            # reconfiguring the root logger inside the web process.
+            scraper = GoogleMapsScraper(
+                scraper_config,
+                log_file=log_file,
+                configure_root_logger=False,
+            )
             
             # Set up progress monitoring
             progress_callback = ProgressCallback(job_id, self)
@@ -378,7 +388,7 @@ class ScraperManager:
                 job.end_time = datetime.now().isoformat()
                 job.results_file = results_file
                 job.reviews_file = reviews_file
-                job.log_file = f"scraper_log_{timestamp}.log"
+                job.log_file = log_file
                 
                 # Final progress update
                 job.progress['percentage'] = 100
@@ -399,6 +409,9 @@ class ScraperManager:
                     del self.active_threads[job_id]
 
     def _run_owner_enrichment_job(self, job_id: str, job_config: JobConfig) -> None:
+        if job_config.owner_in_place and job_config.owner_resume:
+            raise ValueError("owner_in_place cannot be combined with owner_resume")
+
         csv_path = Path(job_config.owner_csv_path).expanduser()
         if not csv_path.exists():
             raise FileNotFoundError(f"Owner enrichment CSV not found: {csv_path}")
@@ -412,7 +425,11 @@ class ScraperManager:
         else:
             output_path = csv_path.with_name(f"{csv_path.stem}_owner_enriched_{timestamp}{csv_path.suffix}")
 
-        enrichment_config = Config()
+        config_path = parent_dir / "config.yaml"
+        try:
+            enrichment_config = Config.from_file(str(config_path))
+        except Exception:
+            enrichment_config = Config()
         if job_config.config_overrides:
             for key, value in job_config.config_overrides.items():
                 if key == 'owner_enrichment' and isinstance(value, dict):

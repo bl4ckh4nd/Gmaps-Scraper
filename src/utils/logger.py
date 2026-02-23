@@ -2,53 +2,70 @@
 
 import logging
 import datetime
-from pathlib import Path
 from typing import Optional
 
 
-def setup_logging(log_level: str = 'INFO', 
-                  log_file: Optional[str] = None,
-                  log_format: Optional[str] = None) -> logging.Logger:
+def setup_logging(
+    log_level: str = "INFO",
+    log_file: Optional[str] = None,
+    log_format: Optional[str] = None,
+    configure_root: bool = True,
+) -> logging.Logger:
     """Set up logging configuration for the scraper.
-    
+
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         log_file: Optional log file path. If None, auto-generates with timestamp
         log_format: Log message format string
-        
+        configure_root: If True, reconfigures the root logger; if False, only
+            attaches handlers to the project logger without touching global config.
+
     Returns:
-        Configured root logger
+        Configured project logger
     """
-    # Default format
     if log_format is None:
-        log_format = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-    
-    # Auto-generate log file if not provided
+        log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
     if log_file is None:
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = f"scraper_log_{timestamp}.log"
-    
-    # Convert string level to logging constant
+
     numeric_level = getattr(logging, log_level.upper(), logging.INFO)
-    
-    # Clear any existing handlers
-    root_logger = logging.getLogger()
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-    
-    # Configure logging with both file and console handlers
-    logging.basicConfig(
-        level=numeric_level,
-        format=log_format,
-        handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler()
-        ]
-    )
-    
-    logger = logging.getLogger('GoogleMapsScraper')
-    logger.info(f"Logging initialized - Level: {log_level}, File: {log_file}")
-    
+
+    logger = logging.getLogger("GoogleMapsScraper")
+
+    if configure_root:
+        # Clear any existing handlers on the root logger and reconfigure
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+
+        logging.basicConfig(
+            level=numeric_level,
+            format=log_format,
+            handlers=[
+                logging.FileHandler(log_file, encoding="utf-8"),
+                logging.StreamHandler(),
+            ],
+        )
+    else:
+        # Scoped configuration: attach handlers only to the project logger
+        logger.setLevel(numeric_level)
+        formatter = logging.Formatter(log_format)
+
+        has_file_handler = any(
+            isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == log_file
+            for h in logger.handlers
+        )
+
+        if not has_file_handler and log_file is not None:
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+
+        # Leave console/other handlers to the surrounding application (e.g. Flask)
+
+    logger.info("Logging initialized - Level: %s, File: %s", log_level, log_file)
     return logger
 
 

@@ -11,7 +11,7 @@ from typing import Callable, Dict, Iterable, Optional
 
 from ..config import Config, OwnerEnrichmentSettings
 from ..models import Business
-from ..utils import OwnerEnrichmentService
+from ..utils.owner_enrichment_service import OwnerEnrichmentService
 
 
 OWNER_COLUMNS = [
@@ -81,10 +81,20 @@ class OwnerCSVEnricher:
         output_path = self._determine_output_path(input_path, options)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if options.in_place and options.resume:
+            raise ValueError(
+                "In-place owner enrichment cannot be resumed safely. "
+                "Use a separate output file with --owner-resume."
+            )
+
         state_path = options.state_path or output_path.with_suffix(output_path.suffix + ".state.json")
 
         resume_state = self._load_resume_state(state_path) if options.resume else None
-        processed_signatures = resume_state.get("processed", set()) if resume_state else set()
+        last_processed_row = -1
+        if options.resume:
+            state_checkpoint = resume_state.get("last_processed_row", -1) if resume_state else -1
+            output_checkpoint = self._count_data_rows(output_path) - 1 if output_path.exists() else -1
+            last_processed_row = max(state_checkpoint, output_checkpoint)
 
         # Apply owner model override if provided
         if options.owner_model:
@@ -110,10 +120,6 @@ class OwnerCSVEnricher:
 
         result = OwnerCSVEnrichmentResult(output_path=output_path)
 
-        # If resume with existing output, seed processed signatures from that file
-        if is_resume_append:
-            processed_signatures.update(self._load_signatures_from_csv(output_path))
-
         # Prepare writer
         header = list(self._business_header())
         write_header = not is_resume_append
@@ -137,11 +143,10 @@ class OwnerCSVEnricher:
                 if write_header:
                     writer.writeheader()
 
-                for row in reader:
+                for row_index, row in enumerate(reader):
                     result.total_rows += 1
-                    signature = self._row_signature(row)
 
-                    if signature in processed_signatures:
+                    if options.resume and row_index <= last_processed_row:
                         result.skipped_existing += 1
                         continue
 
@@ -155,7 +160,6 @@ class OwnerCSVEnricher:
                         result.failed_rows += 1
 
                     writer.writerow(enriched_row)
-                    processed_signatures.add(signature)
                     result.processed_rows += 1
                     if owner_found:
                         result.owners_found += 1
@@ -172,7 +176,7 @@ class OwnerCSVEnricher:
                         )
 
                     if options.resume:
-                        self._save_resume_state(state_path, processed_signatures)
+                        self._save_resume_state(state_path, row_index)
 
         # Finalise output when running in-place
         if tmp_output_path and tmp_output_path.exists():
@@ -211,15 +215,6 @@ class OwnerCSVEnricher:
         dummy_business = Business(place_id="", name="")
         return dummy_business.to_dict().keys()
 
-    def _row_signature(self, row: Dict[str, str]) -> str:
-        key_parts = [
-            row.get("Place ID", ""),
-            row.get("Names", ""),
-            row.get("Address", ""),
-            row.get("Website", ""),
-        ]
-        return "|".join(key_parts)
-
     def _enrich_row(
         self,
         row: Dict[str, str],
@@ -229,7 +224,6 @@ class OwnerCSVEnricher:
         """Return updated row plus flag whether an owner was found."""
 
         existing_owner = row.get("Owner Name")
-        existing_status = row.get("Owner Status")
 
         if skip_existing and existing_owner:
             row.setdefault("Owner Status", "skip_existing")
@@ -242,21 +236,29 @@ class OwnerCSVEnricher:
         enriched = business.to_dict()
         return enriched, bool(details.owner_name)
 
-    def _load_signatures_from_csv(self, path: Path) -> set[str]:
-        signatures: set[str] = set()
+    def _count_data_rows(self, path: Path) -> int:
         with path.open("r", encoding="utf-8", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                signatures.add(self._row_signature(row))
-        return signatures
+            reader = csv.reader(fh)
+            next(reader, None)
+            return sum(1 for _ in reader)
 
-    def _load_resume_state(self, state_path: Path) -> Optional[Dict[str, set[str]]]:
+    def _load_resume_state(self, state_path: Path) -> Optional[Dict[str, int]]:
         if not state_path.exists():
             return None
         with state_path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
-        processed = set(data.get("processed", []))
-        return {"processed": processed}
+        checkpoint = data.get("last_processed_row")
+        if isinstance(checkpoint, int):
+            return {"last_processed_row": max(-1, checkpoint)}
 
-    def _save_resume_state(self, state_path: Path, processed: set[str]) -> None:
-        state_path.write_text(json.dumps({"processed": list(processed)}), encoding="utf-8")
+        legacy_processed = data.get("processed", [])
+        if isinstance(legacy_processed, list):
+            # Legacy state tracked signatures, which are no longer used.
+            # Resume now relies on output row count for a deterministic checkpoint.
+            return {"last_processed_row": -1}
+
+        return {"last_processed_row": -1}
+
+    def _save_resume_state(self, state_path: Path, last_processed_row: int) -> None:
+        payload = {"schema_version": 2, "last_processed_row": max(-1, int(last_processed_row))}
+        state_path.write_text(json.dumps(payload), encoding="utf-8")

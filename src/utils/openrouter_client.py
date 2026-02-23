@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any, Dict, Iterable, List, Optional
@@ -158,11 +159,58 @@ def extract_owner_name_from_response(response: Dict[str, Any]) -> Optional[str]:
             if "parsed" in message:
                 parsed = message["parsed"]
                 if isinstance(parsed, dict):
-                    return parsed.get("owner_name") or parsed.get("owner")
+                    candidate = parsed.get("owner_name") or parsed.get("owner")
+                    if isinstance(candidate, str):
+                        cleaned = candidate.strip()
+                        return cleaned or None
+                    if candidate is None:
+                        return None
             content = message.get("content")
             if isinstance(content, str):
-                return content.strip()
+                return _extract_owner_name_from_content(content)
+
+            # Some responses encode message content as a list of parts.
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        text_parts.append(part["text"])
+                if text_parts:
+                    return _extract_owner_name_from_content(" ".join(text_parts))
     return None
+
+
+def _extract_owner_name_from_content(content: str) -> Optional[str]:
+    cleaned = content.strip()
+    if not cleaned:
+        return None
+
+    # Prefer extracting from JSON content, which is expected when response_format=json_object.
+    try:
+        parsed = json.loads(cleaned)
+    except (TypeError, ValueError):
+        parsed = None
+    else:
+        if isinstance(parsed, dict):
+            candidate = parsed.get("owner_name") or parsed.get("owner")
+            if isinstance(candidate, str):
+                name = candidate.strip()
+                return name or None
+            return None
+
+    # If content appears to be JSON but failed to parse, avoid storing raw blobs as owner names.
+    if cleaned.startswith("{") or cleaned.startswith("["):
+        return None
+
+    normalized = " ".join(cleaned.split())
+    lowered = normalized.lower()
+    if lowered in {"null", "none", "n/a", "unknown"}:
+        return None
+
+    # Only accept short, plain-text fallbacks.
+    if len(normalized) > 120:
+        return None
+    return normalized
 
 
 def filter_free_models(models: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

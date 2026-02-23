@@ -3,6 +3,9 @@ flask>=2.3.0
 flask-cors>=4.0.0
 flask-limiter>=3.0.0
 
+# Encryption for secure API key storage
+cryptography>=41.0.0
+
 # Production WSGI server (Unix/Linux)
 gunicorn>=20.1.0; sys_platform != "win32"
 

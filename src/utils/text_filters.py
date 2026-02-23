@@ -24,9 +24,19 @@ def extract_owner_snippets(
     *,
     max_chars: int = 4000,
 ) -> str:
+    snippet, _ = extract_owner_snippets_with_sources(documents, max_chars=max_chars)
+    return snippet
+
+
+def extract_owner_snippets_with_sources(
+    documents: Iterable[OwnerDocument],
+    *,
+    max_chars: int = 4000,
+) -> tuple[str, list[OwnerDocument]]:
     """Reduce crawled documents to the most relevant owner-related snippets."""
 
     snippets: list[str] = []
+    evidence_documents: list[OwnerDocument] = []
     for document in documents:
         content = (document.content or "").strip()
         if not content:
@@ -39,12 +49,13 @@ def extract_owner_snippets(
         if sample:
             header = document.title or document.url
             snippets.append(f"Source: {header}\n{sample}")
+            evidence_documents.append(document)
         combined = "\n\n".join(snippets)
         if len(combined) >= max_chars:
             break
 
     combined = "\n\n".join(snippets)[:max_chars]
-    return normalize_whitespace(combined)
+    return normalize_whitespace(combined), evidence_documents
 
 
 def normalize_whitespace(text: str) -> str:
