@@ -11,8 +11,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 .DS_Store
-*.html
-*.png
+debug/*.html
+debug/*.png
+screenshots/*.png
 screenshots/
 debug/
 AGENTS.md
