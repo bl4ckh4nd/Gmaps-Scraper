@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Results Viewer - Google Maps Scraper</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <nav>
+                <a href="{{ url_for('index') }}" class="back-link">
+                    <i class="fas fa-arrow-left"></i> Back to Dashboard
+                </a>
+            </nav>
+            <h1><i class="fas fa-table"></i> Results Viewer</h1>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Job Info -->
+        <div class="card">
+            <div class="card-header">
+                <h2 id="job-title">Results Overview</h2>
+                <div class="card-actions">
+                    <button onclick="downloadAllResults()" class="btn btn-success btn-sm">
+                        <i class="fas fa-download"></i> Download All
+                    </button>
+                    <button onclick="refreshResults()" class="btn btn-secondary btn-sm">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="job-info" class="loading">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <p>Loading job information...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Summary -->
+        <div class="card">
+            <div class="card-header">
+                <h2><i class="fas fa-chart-bar"></i> Results Summary</h2>
+            </div>
+            <div class="card-body">
+                <div id="results-summary" class="stats-grid">
+                    <!-- Summary will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Data Files -->
+        <div class="card">
+            <div class="card-header">
+                <h2><i class="fas fa-file-csv"></i> Data Files</h2>
+            </div>
+            <div class="card-body">
+                <div id="data-files" class="results-grid">
+                    <!-- Files will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Business Data Preview -->
+        <div class="card" id="business-preview" style="display: none;">
+            <div class="card-header">
+                <h2><i class="fas fa-building"></i> Business Data Preview</h2>
+                <small>(First 10 records)</small>
+            </div>
+            <div class="card-body">
+                <div class="table-container">
+                    <table id="business-table" class="data-table">
+                        <thead></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reviews Data Preview -->
+        <div class="card" id="reviews-preview" style="display: none;">
+            <div class="card-header">
+                <h2><i class="fas fa-star"></i> Reviews Data Preview</h2>
+                <small>(First 10 records)</small>
+            </div>
+            <div class="card-body">
+                <div class="table-container">
+                    <table id="reviews-table" class="data-table">
+                        <thead></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <style>
+        /* Additional styles for results viewer */
+        .table-container {
+            overflow-x: auto;
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+        }
+        
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+        
+        .data-table th,
+        .data-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            vertical-align: top;
+        }
+        
+        .data-table th {
+            background: var(--light-color);
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        
+        .data-table td {
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .data-table td:hover {
+            white-space: normal;
+            word-wrap: break-word;
+        }
+        
+        .data-table tr:hover {
+            background: var(--light-color);
+        }
+        
+        .cell-url {
+            color: var(--primary-color);
+            text-decoration: underline;
+        }
+        
+        .cell-rating {
+            font-weight: 600;
+        }
+        
+        .cell-rating.high {
+            color: var(--success-color);
+        }
+        
+        .cell-rating.medium {
+            color: var(--warning-color);
+        }
+        
+        .cell-rating.low {
+            color: var(--danger-color);
+        }
+    </style>
+
+    <script>
+        // Get job ID from URL or template variable
+        const jobId = '{{ job_id }}';
+        let jobData = null;
+        let resultsData = null;
+
+        // Initialize results viewer
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeResultsViewer();
+        });
+
+        async function initializeResultsViewer() {
+            console.log('Initializing results viewer for job:', jobId);
+            
+            try {
+                // Load job information
+                await loadJobInfo();
+                
+                // Load results data
+                await loadResultsData();
+                
+                // Display data
+                displayResultsSummary();
+                displayDataFiles();
+                
+                // Load data previews (optional)
+                // await loadDataPreviews();
+                
+            } catch (error) {
+                console.error('Error initializing results viewer:', error);
+                showToast('Error loading results', 'error');
+            }
+        }
+
+        async function loadJobInfo() {
+            const response = await fetch(`/api/jobs/${jobId}`);
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load job info');
+            }
+            
+            jobData = data;
+            
+            // Update page title
+            document.getElementById('job-title').textContent = 
+                `Results: ${jobData.config.search_term}`;
+            
+            // Display job info
+            const jobInfo = document.getElementById('job-info');
+            jobInfo.innerHTML = `
+                <div class="job-overview">
+                    <div class="job-meta">
+                        <div class="status-badge ${getStatusClass(jobData.status)}">
+                            <i class="fas ${getStatusIcon(jobData.status)}"></i>
+                            ${jobData.status.toUpperCase()}
+                        </div>
+                        <div class="job-id">
+                            <strong>Job ID:</strong> 
+                            <code>${jobData.job_id}</code>
+                        </div>
+                    </div>
+                    
+                    <div class="time-info">
+                        <div class="time-item">
+                            <i class="fas fa-clock"></i>
+                            <span>Started: ${formatDateTime(jobData.start_time)}</span>
+                        </div>
+                        ${jobData.end_time ? `
+                            <div class="time-item">
+                                <i class="fas fa-flag-checkered"></i>
+                                <span>Completed: ${formatDateTime(jobData.end_time)}</span>
+                            </div>
+                        ` : ''}
+                        <div class="time-item">
+                            <i class="fas fa-stopwatch"></i>
+                            <span>Duration: ${jobData.elapsed_time}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function loadResultsData() {
+            if (jobData.status !== 'completed') {
+                throw new Error('Job is not completed yet');
+            }
+            
+            const response = await fetch(`/api/jobs/${jobId}/results`);
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to load results data');
+            }
+            
+            resultsData = data;
+        }
+
+        function displayResultsSummary() {
+            const container = document.getElementById('results-summary');
+            const progress = jobData.progress || {};
+            const isOwnerJob = jobData.config && jobData.config.job_type === 'owner_enrichment';
+
+            if (isOwnerJob) {
+                container.innerHTML = `
+                    <div class="stat-item">
+                        <i class="fas fa-list"></i>
+                        <span class="stat-value">${(progress.total_rows || 0).toLocaleString()}</span>
+                        <span class="stat-label">Rows</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-check"></i>
+                        <span class="stat-value">${(progress.processed_rows || 0).toLocaleString()}</span>
+                        <span class="stat-label">Processed</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-user-tie"></i>
+                        <span class="stat-value">${(progress.owners_found || 0).toLocaleString()}</span>
+                        <span class="stat-label">Owners Found</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-percentage"></i>
+                        <span class="stat-value">${Math.round(progress.percentage || 0)}%</span>
+                        <span class="stat-label">Completion</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-calendar-alt"></i>
+                        <span class="stat-value">${formatDateTime(jobData.end_time).split(',')[0]}</span>
+                        <span class="stat-label">Completed</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-clock"></i>
+                        <span class="stat-value">${jobData.elapsed_time}</span>
+                        <span class="stat-label">Duration</span>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = `
+                <div class="stat-item">
+                    <i class="fas fa-target"></i>
+                    <span class="stat-value">${(progress.total || 0).toLocaleString()}</span>
+                    <span class="stat-label">Target Results</span>
+                </div>
+                <div class="stat-item">
+                    <i class="fas fa-check"></i>
+                    <span class="stat-value">${(progress.current || 0).toLocaleString()}</span>
+                    <span class="stat-label">Collected</span>
+                </div>
+                <div class="stat-item">
+                    <i class="fas fa-percentage"></i>
+                    <span class="stat-value">${Math.round(progress.percentage || 0)}%</span>
+                    <span class="stat-label">Success Rate</span>
+                </div>
+                <div class="stat-item">
+                    <i class="fas fa-th"></i>
+                    <span class="stat-value">${(progress.cells_completed || 0)}/${(progress.cells_total || 0)}</span>
+                    <span class="stat-label">Grid Cells</span>
+                </div>
+                <div class="stat-item">
+                    <i class="fas fa-calendar-alt"></i>
+                    <span class="stat-value">${formatDateTime(jobData.end_time).split(',')[0]}</span>
+                    <span class="stat-label">Completed</span>
+                </div>
+                <div class="stat-item">
+                    <i class="fas fa-clock"></i>
+                    <span class="stat-value">${jobData.elapsed_time}</span>
+                    <span class="stat-label">Duration</span>
+                </div>
+            `;
+        }
+
+        function displayDataFiles() {
+            const container = document.getElementById('data-files');
+            const files = resultsData.files;
+            
+            const fileTypes = {
+                'business_data': {
+                    name: 'Business Data',
+                    icon: 'fa-building',
+                    description: 'Business information, owner details, addresses, contacts, ratings'
+                },
+                'reviews_data': {
+                    name: 'Reviews Data', 
+                    icon: 'fa-star',
+                    description: 'Customer reviews, ratings, responses'
+                },
+                'log_file': {
+                    name: 'Log File',
+                    icon: 'fa-file-alt',
+                    description: 'Scraping process logs and debug information'
+                }
+            };
+            
+            container.innerHTML = Object.entries(files).map(([type, fileInfo]) => {
+                if (!fileInfo) return '';
+                
+                const typeInfo = fileTypes[type] || { name: type, icon: 'fa-file', description: 'Data file' };
+                
+                return `
+                    <div class="result-file">
+                        <div class="file-info">
+                            <h4><i class="fas ${typeInfo.icon}"></i> ${typeInfo.name}</h4>
+                            <p>${typeInfo.description}</p>
+                            <div class="file-stats">
+                                <span><strong>Size:</strong> ${formatFileSize(fileInfo.size)}</span>
+                                ${fileInfo.row_count ? `<span><strong>Records:</strong> ${fileInfo.row_count.toLocaleString()}</span>` : ''}
+                                <span><strong>Modified:</strong> ${formatDateTime(fileInfo.modified)}</span>
+                            </div>
+                        </div>
+                        <div class="file-actions">
+                            <a href="/api/jobs/${jobId}/download/${type}" 
+                               class="btn btn-primary btn-sm">
+                                <i class="fas fa-download"></i> Download
+                            </a>
+                            ${type !== 'log_file' && fileInfo.row_count ? `
+                                <button onclick="previewData('${type}')" class="btn btn-secondary btn-sm">
+                                    <i class="fas fa-eye"></i> Preview
+                                </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function previewData(fileType) {
+            showToast('Data preview not implemented yet', 'info');
+            // In a full implementation, this would fetch and display a sample of the data
+        }
+
+        async function downloadAllResults() {
+            const files = resultsData.files;
+            let downloadCount = 0;
+            
+            for (const [type, fileInfo] of Object.entries(files)) {
+                if (fileInfo) {
+                    setTimeout(() => {
+                        const link = document.createElement('a');
+                        link.href = `/api/jobs/${jobId}/download/${type}`;
+                        link.download = `${jobId}_${type}.csv`;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                    }, downloadCount * 1000); // Stagger downloads
+                    
+                    downloadCount++;
+                }
+            }
+            
+            showToast(`Starting download of ${downloadCount} files`, 'success');
+        }
+
+        async function refreshResults() {
+            try {
+                await loadJobInfo();
+                await loadResultsData();
+                displayResultsSummary();
+                displayDataFiles();
+                showToast('Results refreshed', 'success');
+            } catch (error) {
+                console.error('Error refreshing results:', error);
+                showToast('Error refreshing results', 'error');
+            }
+        }
+
+        // Utility functions
+        function getStatusClass(status) {
+            const classes = {
+                'completed': 'status-completed',
+                'failed': 'status-failed',
+                'cancelled': 'status-cancelled'
+            };
+            return classes[status] || 'status-unknown';
+        }
+
+        function getStatusIcon(status) {
+            const icons = {
+                'completed': 'fa-check-circle',
+                'failed': 'fa-times-circle',
+                'cancelled': 'fa-ban'
+            };
+            return icons[status] || 'fa-question-circle';
+        }
+
+        function formatDateTime(dateString) {
+            if (!dateString) return 'N/A';
+            return new Date(dateString).toLocaleString();
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            
+            const icon = type === 'success' ? 'fa-check' : 
+                         type === 'error' ? 'fa-exclamation-triangle' : 
+                         'fa-info-circle';
+            
+            toast.innerHTML = `
+                <i class="fas ${icon}"></i>
+                <span>${message}</span>
+            `;
+            
+            container.appendChild(toast);
+            
+            setTimeout(() => toast.classList.add('show'), 100);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => {
+                    if (container.contains(toast)) {
+                        container.removeChild(toast);
+                    }
+                }, 300);
+            }, 4000);
+        }
+    </script>
+</body>
+</html>

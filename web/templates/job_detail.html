@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Details - Google Maps Scraper</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <nav>
+                <a href="{{ url_for('index') }}" class="back-link">
+                    <i class="fas fa-arrow-left"></i> Back to Dashboard
+                </a>
+            </nav>
+            <h1><i class="fas fa-info-circle"></i> Job Details</h1>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Job Overview -->
+        <div class="card">
+            <div class="card-header">
+                <h2 id="job-title">Job Information</h2>
+                <div class="job-actions">
+                    <button id="cancel-btn" class="btn btn-danger btn-sm" onclick="cancelJob()" style="display: none;">
+                        <i class="fas fa-stop"></i> Cancel Job
+                    </button>
+                    <button class="btn btn-secondary btn-sm" onclick="refreshJobDetails()">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="job-overview" class="job-overview">
+                    <div class="loading">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <p>Loading job details...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div class="card" id="progress-section">
+            <div class="card-header">
+                <h2><i class="fas fa-chart-line"></i> Progress</h2>
+                <div id="live-indicator" class="live-indicator" style="display: none;">
+                    <i class="fas fa-circle"></i> LIVE
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="progress-content">
+                    <!-- Progress bars and stats will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Configuration Details -->
+        <div class="card">
+            <div class="card-header">
+                <h2><i class="fas fa-cog"></i> Configuration</h2>
+            </div>
+            <div class="card-body">
+                <div id="config-details" class="config-grid">
+                    <!-- Configuration details will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div class="card" id="results-section" style="display: none;">
+            <div class="card-header">
+                <h2><i class="fas fa-download"></i> Results</h2>
+            </div>
+            <div class="card-body">
+                <div id="results-content">
+                    <!-- Results and download links will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Section -->
+        <div class="card error-card" id="error-section" style="display: none;">
+            <div class="card-header">
+                <h2><i class="fas fa-exclamation-triangle"></i> Error Details</h2>
+            </div>
+            <div class="card-body">
+                <div id="error-content">
+                    <!-- Error details will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Grid Visualization -->
+        <div class="card" id="grid-section">
+            <div class="card-header">
+                <h2><i class="fas fa-th"></i> Grid Progress</h2>
+            </div>
+            <div class="card-body">
+                <div id="grid-visualization">
+                    <!-- Grid visualization will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <script>
+        // Get job ID from URL or template variable
+        const jobId = '{{ job_id }}';
+        let eventSource = null;
+        let lastStatus = null;
+
+        // Initialize job details page
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeJobDetails();
+        });
+
+        function initializeJobDetails() {
+            console.log('Initializing job details for:', jobId);
+            
+            // Load initial job details
+            refreshJobDetails();
+            
+            // Start real-time updates if job is active
+            startRealTimeUpdates();
+        }
+
+        function refreshJobDetails() {
+            fetch(`/api/jobs/${jobId}`)
+                .then(response => response.json())
+                .then(job => {
+                    updateJobOverview(job);
+                    updateProgressSection(job);
+                    updateConfigDetails(job);
+                    updateResultsSection(job);
+                    updateErrorSection(job);
+                    updateGridVisualization(job);
+                    
+                    lastStatus = job.status;
+                })
+                .catch(error => {
+                    console.error('Error fetching job details:', error);
+                    showToast('Error loading job details', 'error');
+                });
+        }
+
+        function updateJobOverview(job) {
+            const title = document.getElementById('job-title');
+            const overview = document.getElementById('job-overview');
+            
+            title.textContent = `${job.config.search_term} (${job.status.toUpperCase()})`;
+            
+            const statusClass = getStatusClass(job.status);
+            
+            overview.innerHTML = `
+                <div class="job-meta">
+                    <div class="status-badge ${statusClass}">
+                        <i class="fas ${getStatusIcon(job.status)}"></i>
+                        ${job.status.toUpperCase()}
+                    </div>
+                    <div class="job-id">
+                        <strong>Job ID:</strong> 
+                        <code>${job.job_id}</code>
+                        <button onclick="copyToClipboard('${job.job_id}')" class="btn-icon" title="Copy Job ID">
+                            <i class="fas fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="time-info">
+                    <div class="time-item">
+                        <i class="fas fa-clock"></i>
+                        <span>Started: ${formatDateTime(job.start_time)}</span>
+                    </div>
+                    ${job.end_time ? `
+                        <div class="time-item">
+                            <i class="fas fa-flag-checkered"></i>
+                            <span>Finished: ${formatDateTime(job.end_time)}</span>
+                        </div>
+                    ` : ''}
+                    <div class="time-item">
+                        <i class="fas fa-stopwatch"></i>
+                        <span>Duration: ${job.elapsed_time}</span>
+                    </div>
+                    ${job.estimated_remaining && job.status === 'running' ? `
+                        <div class="time-item">
+                            <i class="fas fa-hourglass-half"></i>
+                            <span>Est. Remaining: ${job.estimated_remaining}</span>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+
+            // Show/hide cancel button
+            const cancelBtn = document.getElementById('cancel-btn');
+            if (job.status === 'running' || job.status === 'pending') {
+                cancelBtn.style.display = 'inline-block';
+            } else {
+                cancelBtn.style.display = 'none';
+            }
+        }
+
+        function updateProgressSection(job) {
+            const content = document.getElementById('progress-content');
+            const liveIndicator = document.getElementById('live-indicator');
+            
+            if (job.status === 'running') {
+                liveIndicator.style.display = 'block';
+            } else {
+                liveIndicator.style.display = 'none';
+            }
+            
+            const progress = job.progress;
+            const percentage = Math.round(progress.percentage);
+            
+            content.innerHTML = `
+                <div class="progress-item">
+                    <div class="progress-label">
+                        <span>Overall Progress</span>
+                        <span>${progress.current} / ${progress.total} (${percentage}%)</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${percentage}%"></div>
+                    </div>
+                </div>
+                
+                <div class="progress-item">
+                    <div class="progress-label">
+                        <span>Grid Cells</span>
+                        <span>${progress.cells_completed} / ${progress.cells_total}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${progress.cells_total > 0 ? (progress.cells_completed / progress.cells_total * 100) : 0}%"></div>
+                    </div>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <i class="fas fa-target"></i>
+                        <span class="stat-value">${progress.total}</span>
+                        <span class="stat-label">Target</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-check"></i>
+                        <span class="stat-value">${progress.current}</span>
+                        <span class="stat-label">Collected</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-percentage"></i>
+                        <span class="stat-value">${percentage}%</span>
+                        <span class="stat-label">Complete</span>
+                    </div>
+                    <div class="stat-item">
+                        <i class="fas fa-th"></i>
+                        <span class="stat-value">${progress.cells_completed}/${progress.cells_total}</span>
+                        <span class="stat-label">Cells</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateConfigDetails(job) {
+            const config = job.config;
+            const content = document.getElementById('config-details');
+            
+            content.innerHTML = `
+                <div class="config-item">
+                    <label>Search Term:</label>
+                    <span>${config.search_term}</span>
+                </div>
+                <div class="config-item">
+                    <label>Target Results:</label>
+                    <span>${config.total_results.toLocaleString()}</span>
+                </div>
+                <div class="config-item">
+                    <label>Grid Size:</label>
+                    <span>${config.grid_size}x${config.grid_size}</span>
+                </div>
+                <div class="config-item">
+                    <label>Max Reviews:</label>
+                    <span>${config.max_reviews || 'Default'}</span>
+                </div>
+                <div class="config-item">
+                    <label>Headless Mode:</label>
+                    <span>${config.headless ? 'Yes' : 'No'}</span>
+                </div>
+                <div class="config-item">
+                    <label>Search Bounds:</label>
+                    <span>${config.bounds ? `[${config.bounds.join(', ')}]` : 'Global'}</span>
+                </div>
+            `;
+        }
+
+        function updateResultsSection(job) {
+            const resultsSection = document.getElementById('results-section');
+            const resultsContent = document.getElementById('results-content');
+            
+            if (job.status === 'completed') {
+                resultsSection.style.display = 'block';
+                
+                // Fetch detailed results info
+                fetch(`/api/jobs/${jobId}/results`)
+                    .then(response => response.json())
+                    .then(results => {
+                        resultsContent.innerHTML = `
+                            <div class="results-grid">
+                                ${Object.entries(results.files).map(([type, fileInfo]) => {
+                                    if (!fileInfo) return '';
+                                    
+                                    const typeLabels = {
+                                        'business_data': 'Business Data',
+                                        'reviews_data': 'Reviews Data', 
+                                        'log_file': 'Log File'
+                                    };
+                                    
+                                    return `
+                                        <div class="result-file">
+                                            <div class="file-info">
+                                                <h4>${typeLabels[type] || type}</h4>
+                                                <p>Size: ${formatFileSize(fileInfo.size)}</p>
+                                                <p>Modified: ${formatDateTime(fileInfo.modified)}</p>
+                                                ${fileInfo.row_count ? `<p>Rows: ${fileInfo.row_count.toLocaleString()}</p>` : ''}
+                                            </div>
+                                            <a href="/api/jobs/${jobId}/download/${type}" 
+                                               class="btn btn-primary btn-sm">
+                                                <i class="fas fa-download"></i> Download
+                                            </a>
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        `;
+                    })
+                    .catch(error => {
+                        resultsContent.innerHTML = '<p class="error">Error loading results information</p>';
+                    });
+            } else {
+                resultsSection.style.display = 'none';
+            }
+        }
+
+        function updateErrorSection(job) {
+            const errorSection = document.getElementById('error-section');
+            const errorContent = document.getElementById('error-content');
+            
+            if (job.status === 'failed' && job.error_message) {
+                errorSection.style.display = 'block';
+                errorContent.innerHTML = `
+                    <div class="error-message">
+                        <pre>${job.error_message}</pre>
+                    </div>
+                `;
+            } else {
+                errorSection.style.display = 'none';
+            }
+        }
+
+        function updateGridVisualization(job) {
+            const content = document.getElementById('grid-visualization');
+            const gridSize = job.config.grid_size;
+            const cellsCompleted = job.progress.cells_completed;
+            const cellsTotal = job.progress.cells_total;
+            
+            let gridHTML = '<div class="grid-container">';
+            
+            for (let i = 0; i < gridSize * gridSize; i++) {
+                const isCompleted = i < cellsCompleted;
+                const cellClass = isCompleted ? 'grid-cell completed' : 'grid-cell pending';
+                gridHTML += `<div class="${cellClass}" title="Cell ${i + 1}/${cellsTotal}">${i + 1}</div>`;
+            }
+            
+            gridHTML += '</div>';
+            gridHTML += `<p class="grid-legend">
+                <span><span class="legend-completed"></span> Completed</span>
+                <span><span class="legend-pending"></span> Pending</span>
+            </p>`;
+            
+            content.innerHTML = gridHTML;
+        }
+
+        function startRealTimeUpdates() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            eventSource = new EventSource(`/api/jobs/${jobId}/stream`);
+            
+            eventSource.onmessage = function(event) {
+                try {
+                    const job = JSON.parse(event.data);
+                    updateJobOverview(job);
+                    updateProgressSection(job);
+                    updateResultsSection(job);
+                    updateErrorSection(job);
+                    updateGridVisualization(job);
+                    
+                    // Stop streaming if job is finished
+                    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+                        eventSource.close();
+                        showToast(`Job ${job.status}!`, job.status === 'completed' ? 'success' : 'error');
+                    }
+                } catch (error) {
+                    console.error('Error parsing SSE data:', error);
+                }
+            };
+            
+            eventSource.onerror = function(event) {
+                console.error('SSE error:', event);
+                // Try to reconnect after a delay
+                setTimeout(() => {
+                    if (lastStatus === 'running') {
+                        startRealTimeUpdates();
+                    }
+                }, 5000);
+            };
+        }
+
+        function cancelJob() {
+            if (!confirm('Are you sure you want to cancel this job?')) {
+                return;
+            }
+            
+            fetch(`/api/jobs/${jobId}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(result => {
+                    showToast('Job cancelled', 'success');
+                    refreshJobDetails();
+                })
+                .catch(error => {
+                    console.error('Error cancelling job:', error);
+                    showToast('Error cancelling job', 'error');
+                });
+        }
+
+        // Utility functions
+        function getStatusClass(status) {
+            const classes = {
+                'pending': 'status-pending',
+                'running': 'status-running', 
+                'completed': 'status-completed',
+                'failed': 'status-failed',
+                'cancelled': 'status-cancelled'
+            };
+            return classes[status] || 'status-unknown';
+        }
+
+        function getStatusIcon(status) {
+            const icons = {
+                'pending': 'fa-clock',
+                'running': 'fa-spinner fa-spin',
+                'completed': 'fa-check-circle',
+                'failed': 'fa-times-circle', 
+                'cancelled': 'fa-ban'
+            };
+            return icons[status] || 'fa-question-circle';
+        }
+
+        function formatDateTime(dateString) {
+            if (!dateString) return 'N/A';
+            return new Date(dateString).toLocaleString();
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Job ID copied to clipboard', 'success');
+            });
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.innerHTML = `
+                <i class="fas ${type === 'success' ? 'fa-check' : type === 'error' ? 'fa-exclamation-triangle' : 'fa-info-circle'}"></i>
+                <span>${message}</span>
+            `;
+            
+            container.appendChild(toast);
+            
+            setTimeout(() => toast.classList.add('show'), 100);
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => container.removeChild(toast), 300);
+            }, 3000);
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (eventSource) {
+                eventSource.close();
+            }
+        });
+    </script>
+</body>
+</html>

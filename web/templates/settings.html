@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Google Maps Scraper</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
+</head>
+<body>
+    <div class="settings-container">
+        <!-- Header -->
+        <div class="settings-header">
+            <div class="header-left">
+                <h1><i class="fas fa-cog"></i> Settings</h1>
+                <p>Configure your Google Maps Scraper</p>
+            </div>
+            <div class="header-right">
+                <a href="/" class="btn btn-secondary">
+                    <i class="fas fa-arrow-left"></i> Back to Dashboard
+                </a>
+            </div>
+        </div>
+
+        <!-- Settings Content -->
+        <div class="settings-content">
+            <!-- Tab Navigation -->
+            <div class="settings-nav">
+                <button class="nav-item active" data-tab="browser">
+                    <i class="fas fa-chrome"></i> Browser
+                </button>
+                <button class="nav-item" data-tab="owner">
+                    <i class="fas fa-key"></i> Owner Enrichment
+                </button>
+                <button class="nav-item" data-tab="scraping">
+                    <i class="fas fa-sliders-h"></i> Scraping
+                </button>
+                <button class="nav-item" data-tab="advanced">
+                    <i class="fas fa-wrench"></i> Advanced
+                </button>
+            </div>
+
+            <!-- Tab Content -->
+            <div class="settings-tabs">
+                <!-- Browser Tab -->
+                <div class="tab-content active" data-tab="browser">
+                    <h2>Browser Configuration</h2>
+                    <p class="tab-description">Configure Chrome browser settings for scraping operations</p>
+
+                    <div class="form-section">
+                        <div class="form-group">
+                            <label for="chromePath">Chrome Executable Path</label>
+                            <div class="input-group">
+                                <input type="text" id="chromePath" placeholder="Path to Chrome executable">
+                                <button class="btn btn-secondary" onclick="detectBrowser()">
+                                    <i class="fas fa-search"></i> Detect
+                                </button>
+                                <button class="btn btn-secondary" onclick="testBrowser()">
+                                    <i class="fas fa-vial"></i> Test
+                                </button>
+                            </div>
+                            <small class="help-text">Path to your Chrome or Chromium browser executable</small>
+                        </div>
+
+                        <div class="status-indicator" id="chromeStatus" style="display: none;">
+                            <i class="fas fa-circle"></i>
+                            <span id="chromeStatusText"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="defaultHeadless">
+                                Run browser in headless mode by default
+                            </label>
+                            <small class="help-text">Headless mode runs browser without UI (faster, less resource intensive)</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Owner Enrichment Tab -->
+                <div class="tab-content" data-tab="owner">
+                    <h2>Owner Enrichment</h2>
+                    <p class="tab-description">Configure AI-powered business owner extraction using OpenRouter</p>
+
+                    <div class="form-section">
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="ownerEnrichmentEnabled" onchange="toggleOwnerFields()">
+                                Enable Owner Enrichment
+                            </label>
+                            <small class="help-text">Extract business owner information using LLM-powered web crawling</small>
+                        </div>
+
+                        <div id="ownerFields" style="display: none;">
+                            <div class="form-group">
+                                <label for="apiKey">OpenRouter API Key</label>
+                                <div class="input-group">
+                                    <input type="password" id="apiKey" placeholder="sk-or-v1-...">
+                                    <button class="btn btn-secondary" onclick="toggleApiKeyVisibility()">
+                                        <i class="fas fa-eye" id="apiKeyIcon"></i>
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="testApiKey()">
+                                        <i class="fas fa-vial"></i> Test
+                                    </button>
+                                </div>
+                                <small class="help-text">
+                                    Get your API key from <a href="https://openrouter.ai" target="_blank">openrouter.ai</a>
+                                </small>
+                            </div>
+
+                            <div class="status-indicator" id="apiStatus" style="display: none;">
+                                <i class="fas fa-circle"></i>
+                                <span id="apiStatusText"></span>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="apiModel">Model</label>
+                                <input type="text" id="apiModel" placeholder="google/gemini-2.0-flash-exp:free">
+                                <small class="help-text">OpenRouter model ID (default uses free model)</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Scraping Tab -->
+                <div class="tab-content" data-tab="scraping">
+                    <h2>Scraping Behavior</h2>
+                    <p class="tab-description">Default scraping preferences (can be overridden per job)</p>
+
+                    <div class="form-section">
+                        <div class="form-group">
+                            <label for="defaultScrapingMode">Default Scraping Mode</label>
+                            <select id="defaultScrapingMode">
+                                <option value="fast">Fast (sequential cells)</option>
+                                <option value="coverage">Coverage (distributed across all cells)</option>
+                            </select>
+                            <small class="help-text">
+                                Fast mode stops when target reached. Coverage mode distributes target across grid.
+                            </small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="defaultGridSize">Default Grid Size</label>
+                            <input type="range" id="defaultGridSize" min="1" max="5" value="2">
+                            <div class="range-value">
+                                <span id="gridSizeValue">2</span> x <span id="gridSizeValue2">2</span> cells
+                            </div>
+                            <small class="help-text">
+                                Grid subdivision for geographic area (larger = better coverage, slower)
+                            </small>
+                        </div>
+
+                        <div class="info-box">
+                            <i class="fas fa-info-circle"></i>
+                            <div>
+                                <strong>Advanced Settings</strong>
+                                <p>For advanced settings like scroll intervals, max listings per cell, and timeout values,
+                                   edit the <code>config.yaml</code> file directly.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Advanced Tab -->
+                <div class="tab-content" data-tab="advanced">
+                    <h2>Advanced Settings</h2>
+                    <p class="tab-description">System information and advanced configuration options</p>
+
+                    <div class="form-section">
+                        <div class="info-section">
+                            <h3><i class="fas fa-database"></i> Database</h3>
+                            <div class="info-row">
+                                <span>Location:</span>
+                                <code id="dbLocation">web/database/scraper.db</code>
+                            </div>
+                            <div class="info-row">
+                                <span>Status:</span>
+                                <span class="status-badge" id="dbStatus">Connected</span>
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3><i class="fas fa-file-code"></i> Configuration File</h3>
+                            <div class="info-row">
+                                <span>Location:</span>
+                                <code id="configLocation">config.yaml</code>
+                            </div>
+                            <div class="info-row">
+                                <span>Priority:</span>
+                                <span>ENV > Database > YAML > Defaults</span>
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3><i class="fas fa-code"></i> Effective Configuration</h3>
+                            <button class="btn btn-secondary" onclick="viewEffectiveConfig()">
+                                <i class="fas fa-eye"></i> View Current Config (JSON)
+                            </button>
+                        </div>
+
+                        <div class="danger-zone">
+                            <h3><i class="fas fa-exclamation-triangle"></i> Danger Zone</h3>
+                            <button class="btn btn-danger" onclick="resetToDefaults()">
+                                <i class="fas fa-redo"></i> Reset All Settings to Defaults
+                            </button>
+                            <small class="help-text">This will clear all database settings and reload from config.yaml</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer Actions -->
+        <div class="settings-footer">
+            <div class="footer-left">
+                <span class="last-saved" id="lastSaved" style="display: none;">
+                    <i class="fas fa-check-circle"></i> Saved <span id="lastSavedTime"></span>
+                </span>
+            </div>
+            <div class="footer-right">
+                <button class="btn btn-secondary" onclick="cancelChanges()">
+                    <i class="fas fa-times"></i> Cancel
+                </button>
+                <button class="btn btn-primary" onclick="saveSettings()">
+                    <i class="fas fa-save"></i> Save Changes
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p id="loadingMessage">Processing...</p>
+        </div>
+    </div>
+
+    <!-- Config Viewer Modal -->
+    <div id="configModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Effective Configuration</h3>
+                <button class="modal-close" onclick="closeConfigModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body">
+                <pre id="configJson"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/settings-panel.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup Wizard - Google Maps Scraper</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/wizard.css') }}">
+</head>
+<body>
+    <div class="wizard-container">
+        <div class="wizard-header">
+            <h1><i class="fas fa-map-marked-alt"></i> Google Maps Scraper</h1>
+            <p>Setup Wizard</p>
+        </div>
+
+        <!-- Progress Indicator -->
+        <div class="progress-indicator">
+            <div class="progress-step active" data-step="0">
+                <div class="step-number">1</div>
+                <div class="step-label">Welcome</div>
+            </div>
+            <div class="progress-line"></div>
+            <div class="progress-step" data-step="1">
+                <div class="step-number">2</div>
+                <div class="step-label">Browser</div>
+            </div>
+            <div class="progress-line"></div>
+            <div class="progress-step" data-step="2">
+                <div class="step-number">3</div>
+                <div class="step-label">API Key</div>
+            </div>
+            <div class="progress-line"></div>
+            <div class="progress-step" data-step="3">
+                <div class="step-number">4</div>
+                <div class="step-label">Verify</div>
+            </div>
+            <div class="progress-line"></div>
+            <div class="progress-step" data-step="4">
+                <div class="step-number">5</div>
+                <div class="step-label">Complete</div>
+            </div>
+        </div>
+
+        <!-- Wizard Steps -->
+        <div class="wizard-content">
+            <!-- Step 0: Welcome -->
+            <div class="wizard-step active" data-step="0">
+                <h2>Welcome to Google Maps Scraper</h2>
+                <p class="intro-text">
+                    Let's get you set up in just a few steps. This wizard will help you configure your scraper for optimal performance.
+                </p>
+                <div class="feature-list">
+                    <div class="feature-item">
+                        <i class="fas fa-chrome"></i>
+                        <div>
+                            <h3>Browser Detection</h3>
+                            <p>Automatically detect or manually configure Chrome</p>
+                        </div>
+                    </div>
+                    <div class="feature-item">
+                        <i class="fas fa-key"></i>
+                        <div>
+                            <h3>Owner Enrichment (Optional)</h3>
+                            <p>Configure AI-powered business owner extraction</p>
+                        </div>
+                    </div>
+                    <div class="feature-item">
+                        <i class="fas fa-check-circle"></i>
+                        <div>
+                            <h3>System Validation</h3>
+                            <p>Verify everything is working correctly</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="nextStep()">Get Started</button>
+                    <button class="btn btn-secondary" onclick="skipWizard()">Skip (Advanced Users)</button>
+                </div>
+            </div>
+
+            <!-- Step 1: Browser Setup -->
+            <div class="wizard-step" data-step="1">
+                <h2>Browser Configuration</h2>
+                <p>Select your Chrome browser executable. The scraper needs Chrome to automate Google Maps navigation.</p>
+
+                <div class="form-group">
+                    <label for="chromePath">Chrome Executable Path</label>
+                    <div class="input-group">
+                        <input type="text" id="chromePath" placeholder="Path to Chrome executable">
+                        <button class="btn btn-secondary" onclick="autoDetectBrowser()">
+                            <i class="fas fa-search"></i> Auto-Detect
+                        </button>
+                    </div>
+                    <small class="help-text">Common paths:
+                        <br>Windows: C:\Program Files\Google\Chrome\Application\chrome.exe
+                        <br>macOS: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+                        <br>Linux: /usr/bin/google-chrome
+                    </small>
+                </div>
+
+                <div id="detectionResults" class="detection-results" style="display: none;">
+                    <h4>Detected Browsers:</h4>
+                    <div id="browserList"></div>
+                </div>
+
+                <div id="validationMessage" class="validation-message"></div>
+
+                <div class="button-group">
+                    <button class="btn btn-secondary" onclick="previousStep()">
+                        <i class="fas fa-arrow-left"></i> Back
+                    </button>
+                    <button class="btn btn-primary" onclick="validateAndNext()" id="browserNextBtn">
+                        Validate & Continue <i class="fas fa-arrow-right"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 2: Owner Enrichment (Optional) -->
+            <div class="wizard-step" data-step="2">
+                <h2>Owner Enrichment Setup (Optional)</h2>
+                <p>Configure AI-powered business owner extraction using OpenRouter API. This feature is optional and can be configured later.</p>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="enableOwnerEnrichment" onchange="toggleOwnerEnrichmentInputs()">
+                        Enable Owner Enrichment
+                    </label>
+                </div>
+
+                <div id="ownerEnrichmentInputs" style="display: none;">
+                    <div class="form-group">
+                        <label for="apiKey">OpenRouter API Key</label>
+                        <div class="input-group">
+                            <input type="password" id="apiKey" placeholder="sk-or-v1-...">
+                            <button class="btn btn-secondary" onclick="toggleApiKeyVisibility()">
+                                <i class="fas fa-eye" id="apiKeyToggleIcon"></i>
+                            </button>
+                        </div>
+                        <small class="help-text">
+                            Get your free API key at <a href="https://openrouter.ai" target="_blank">openrouter.ai</a>
+                        </small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="modelSelect">Model (Optional)</label>
+                        <input type="text" id="modelSelect" placeholder="google/gemini-2.0-flash-exp:free" value="google/gemini-2.0-flash-exp:free">
+                        <small class="help-text">Default free model recommended for most users</small>
+                    </div>
+                </div>
+
+                <div id="apiValidationMessage" class="validation-message"></div>
+
+                <div class="button-group">
+                    <button class="btn btn-secondary" onclick="previousStep()">
+                        <i class="fas fa-arrow-left"></i> Back
+                    </button>
+                    <button class="btn btn-primary" onclick="validateApiKeyAndNext()" id="apiNextBtn">
+                        Continue <i class="fas fa-arrow-right"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 3: Verification -->
+            <div class="wizard-step" data-step="3">
+                <h2>System Verification</h2>
+                <p>Running system checks to ensure everything is configured correctly...</p>
+
+                <div class="verification-checks">
+                    <div class="check-item" id="check-python">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Checking Python version...</span>
+                    </div>
+                    <div class="check-item" id="check-playwright">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Checking Playwright installation...</span>
+                    </div>
+                    <div class="check-item" id="check-chrome">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Validating Chrome browser...</span>
+                    </div>
+                    <div class="check-item" id="check-crawl4ai" style="display: none;">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Checking Crawl4AI (optional)...</span>
+                    </div>
+                    <div class="check-item" id="check-api" style="display: none;">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <span>Validating API key...</span>
+                    </div>
+                </div>
+
+                <div id="verificationSummary" class="verification-summary" style="display: none;"></div>
+
+                <div class="button-group">
+                    <button class="btn btn-secondary" onclick="previousStep()">
+                        <i class="fas fa-arrow-left"></i> Back
+                    </button>
+                    <button class="btn btn-primary" onclick="completeSetup()" id="completeBtn" disabled>
+                        Complete Setup <i class="fas fa-check"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 4: Complete -->
+            <div class="wizard-step" data-step="4">
+                <div class="success-message">
+                    <i class="fas fa-check-circle"></i>
+                    <h2>Setup Complete!</h2>
+                    <p>Your Google Maps Scraper is now configured and ready to use.</p>
+                </div>
+
+                <div class="next-steps">
+                    <h3>Next Steps:</h3>
+                    <ul>
+                        <li><i class="fas fa-play-circle"></i> Start your first scraping job from the dashboard</li>
+                        <li><i class="fas fa-cog"></i> Adjust advanced settings in the Settings panel</li>
+                        <li><i class="fas fa-book"></i> Check the documentation for best practices</li>
+                    </ul>
+                </div>
+
+                <div class="button-group">
+                    <button class="btn btn-primary btn-lg" onclick="goToDashboard()">
+                        <i class="fas fa-home"></i> Go to Dashboard
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p id="loadingMessage">Processing...</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/onboarding-wizard.js') }}"></script>
+</body>
+</html>
