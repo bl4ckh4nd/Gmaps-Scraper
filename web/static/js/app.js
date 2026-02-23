@@ -91,26 +91,30 @@ function initializeMapIfNeeded() {
 // Initialize the application
 function initializeApp() {
     console.log('Initializing Google Maps Scraper Web Interface');
-    
+
     // Set up tabs and lazy-load heavier UI
     setupTabs();
-    
+
+    // Eagerly initialize the map so it is ready before the user interacts
+    // with any bounds controls, regardless of which tab is shown first.
+    requestAnimationFrame(() => initializeMapIfNeeded());
+
     // Set up form submission
     setupFormSubmission();
     setupOwnerEnrichmentForm();
     setupSettingsForms();
-    
+
     // Load initial data
     loadJobs();
     updateHeaderStats();
     loadSettings();
-    
+
     // Start periodic refresh
     setInterval(() => {
         refreshActiveJobs();
         updateHeaderStats();
     }, CONFIG.refreshInterval);
-    
+
     // Load configuration
     loadConfiguration();
 }
@@ -147,7 +151,7 @@ let isDrawingModeEnabled = false;
 let startLatLng = null;
 
 function startDrawing(e) {
-    if (isDrawing || !isDrawingModeEnabled) return;
+    if (isDrawing || !isDrawingModeEnabled || !map) return;
     
     isDrawing = true;
     startLatLng = e.latlng;
@@ -168,7 +172,7 @@ function startDrawing(e) {
 }
 
 function updateDrawing(e) {
-    if (!isDrawing || !startLatLng) return;
+    if (!isDrawing || !startLatLng || !map) return;
     
     // Remove previous rectangle
     if (boundsRectangle) {
@@ -186,7 +190,7 @@ function updateDrawing(e) {
 }
 
 function finishDrawing(e) {
-    if (!isDrawing || !startLatLng) return;
+    if (!isDrawing || !startLatLng || !map) return;
     
     isDrawing = false;
     
@@ -213,10 +217,15 @@ function finishDrawing(e) {
 
 // Drawing mode toggle
 function toggleDrawingMode(enable) {
+    if (!map) {
+        initializeMapIfNeeded();
+        if (!map) return; // map container may not exist on this page
+    }
+
     if (enable === undefined) {
         enable = !isDrawingModeEnabled;
     }
-    
+
     isDrawingModeEnabled = enable;
     const drawButton = document.getElementById('draw-area');
     
@@ -256,30 +265,35 @@ function toggleDrawingMode(enable) {
 
 // Bounds management
 function clearBounds() {
-    if (boundsRectangle) {
+    if (boundsRectangle && map) {
         map.removeLayer(boundsRectangle);
         boundsRectangle = null;
         updateBoundsInfo();
         showToast('Search area cleared', 'info');
     }
-    
+
     // Exit drawing mode
     toggleDrawingMode(false);
 }
 
 function useDefaultBounds() {
+    if (!map) {
+        initializeMapIfNeeded();
+        if (!map) return;
+    }
+
     clearBounds();
-    
+
     const [minLat, minLng, maxLat, maxLng] = CONFIG.defaultBounds;
     const bounds = L.latLngBounds([minLat, minLng], [maxLat, maxLng]);
-    
+
     boundsRectangle = L.rectangle(bounds, {
         color: '#007bff',
         weight: 2,
         opacity: 0.8,
         fillOpacity: 0.2
     }).addTo(map);
-    
+
     map.fitBounds(bounds);
     updateBoundsInfo();
     showToast('Using Berlin default bounds', 'info');
