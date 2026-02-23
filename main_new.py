@@ -15,7 +15,7 @@ from typing import Dict, Tuple
 from src.config import Config
 from src.google_maps_scraper import GoogleMapsScraper, create_scraper_from_args
 from src.services import OwnerCSVEnricher, OwnerCSVEnrichmentOptions
-from src.utils import ScraperException
+from src.utils import ScraperException, load_dotenv
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -354,6 +354,10 @@ def run_owner_csv_enrichment(args: argparse.Namespace) -> None:
 
 def main():
     """Main entry point for the Google Maps scraper."""
+    # Load environment variables from .env if present so API keys are available early.
+    project_root = Path(__file__).resolve().parent
+    load_dotenv(project_root / ".env", override=False)
+
     try:
         # Parse arguments
         args = parse_arguments()

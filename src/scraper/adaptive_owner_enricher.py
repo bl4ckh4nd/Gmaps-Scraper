@@ -7,10 +7,13 @@ import logging
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 try:
-    # Crawl4AI exposes different entry points depending on version; we import lazily.
-    from crawl4ai.crawler import AdaptiveCrawler
-except ImportError:  # pragma: no cover - handled at runtime for helpful error message
-    AdaptiveCrawler = None  # type: ignore[misc]
+    # Crawl4AI export layout changed after v0.6, so we probe both new and old paths.
+    from crawl4ai import AdaptiveCrawler  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - fallback for older releases
+    try:
+        from crawl4ai.crawler import AdaptiveCrawler  # type: ignore[misc]
+    except ImportError:  # pragma: no cover - handled at runtime for helpful error message
+        AdaptiveCrawler = None  # type: ignore[misc]
 
 from ..config import OwnerEnrichmentSettings
 from ..models import OwnerCrawlResult, OwnerDocument
@@ -45,17 +48,32 @@ class AdaptiveOwnerEnricher:
 
     def crawl_owner_content_sync(self, website_url: Optional[str]) -> OwnerCrawlResult:
         """Synchronous helper that runs the adaptive crawl."""
+
+        def _run_in_new_loop() -> OwnerCrawlResult:
+            new_loop = asyncio.new_event_loop()
+            try:
+                try:
+                    asyncio.set_event_loop(new_loop)
+                    return new_loop.run_until_complete(self.crawl_owner_content(website_url))
+                finally:
+                    asyncio.set_event_loop(None)
+            finally:
+                new_loop.close()
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.crawl_owner_content(website_url))
-
-        if loop.is_running():  # e.g. when invoked from async Playwright contexts
-            new_loop = asyncio.new_event_loop()
+            # No running loop in this thread; prefer asyncio.run but guard against
+            # "loop is running" edge cases (Playwright sync API).
             try:
-                return new_loop.run_until_complete(self.crawl_owner_content(website_url))
-            finally:
-                new_loop.close()
+                return asyncio.run(self.crawl_owner_content(website_url))
+            except RuntimeError as exc:
+                if "loop is running" in str(exc).lower():
+                    return _run_in_new_loop()
+                raise
+
+        if loop.is_running():  # e.g. when invoked from a Playwright-managed loop
+            return _run_in_new_loop()
 
         return loop.run_until_complete(self.crawl_owner_content(website_url))
 

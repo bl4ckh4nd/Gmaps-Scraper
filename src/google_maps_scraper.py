@@ -21,6 +21,7 @@ from .utils import (
 )
 from .utils.owner_enrichment_service import OwnerEnrichmentService
 from .utils.logger import get_component_logger, ScraperLoggerAdapter, log_scraping_progress
+from .utils import resolve_chrome_binary
 from .utils.review_analyzer import analyze_reviews
 from .utils.helpers import extract_place_id
 
@@ -132,7 +133,23 @@ class GoogleMapsScraper:
     
     def _initialize_browser_components(self, playwright) -> None:
         """Initialize browser and related components."""
-        self.browser = self._launch_browser_with_fallback(playwright)
+        explicit_path = self.config.settings.browser.executable_path
+        resolved_path = resolve_chrome_binary(explicit_path)
+
+        launch_kwargs = {
+            "headless": self.config.settings.browser.headless,
+        }
+        if resolved_path:
+            launch_kwargs["executable_path"] = resolved_path
+            self.logger.info("Using Chrome executable at %s", resolved_path)
+        elif explicit_path:
+            raise ScraperException(
+                f"Configured Chrome executable not found: {explicit_path}."
+            )
+        else:
+            self.logger.info("No Chrome path provided; using Playwright managed Chromium")
+
+        self.browser = playwright.chromium.launch(**launch_kwargs)
         self.page = self.browser.new_page()
         
         # Initialize browser-dependent components

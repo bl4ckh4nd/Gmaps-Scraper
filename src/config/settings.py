@@ -10,7 +10,7 @@ from pathlib import Path
 @dataclass
 class BrowserSettings:
     """Browser configuration settings."""
-    executable_path: str = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+    executable_path: str = ""
     headless: bool = False
     timeout_navigation: int = 60000
     timeout_element: int = 10000
