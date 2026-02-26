@@ -3,7 +3,7 @@
 import os
 import subprocess
 import sys
-from typing import Tuple, Optional, List
+from typing import Callable, Tuple, Optional, List
 from playwright.sync_api import sync_playwright, Browser, Page
 import argparse
 import time
@@ -73,11 +73,13 @@ class GoogleMapsScraper:
         self.business_scraper: Optional[BusinessScraper] = None
         self.review_scraper: Optional[ReviewScraper] = None
         self.page_navigator: Optional[PageNavigator] = None
+        self._should_cancel_callback: Optional[Callable[[], bool]] = None
     
     def run(self, search_term: str, total_results: int, 
             bounds: Optional[Tuple[float, float, float, float]] = None,
             grid_size: Optional[int] = None,
-            scraping_mode: str = 'fast') -> None:
+            scraping_mode: str = 'fast',
+            should_cancel: Optional[Callable[[], bool]] = None) -> None:
         """Run the scraping process.
         
         Args:
@@ -86,7 +88,9 @@ class GoogleMapsScraper:
             bounds: Geographic bounds, uses default if None
             grid_size: Grid size, uses default if None
             scraping_mode: Scraping mode ('fast' or 'coverage')
+            should_cancel: Optional callback returning True when the run should stop
         """
+        self._should_cancel_callback = should_cancel
         # Set defaults
         bounds = bounds or self.config.settings.grid.default_bounds
         grid_size = grid_size or self.config.settings.grid.default_grid_size
@@ -128,8 +132,14 @@ class GoogleMapsScraper:
             context_logger.error(f"Scraping failed: {e}")
             raise
         finally:
+            self._should_cancel_callback = None
             self._cleanup_browser()
             self._finalize_results(context_logger)
+
+    def _check_cancelled(self) -> None:
+        """Raise if an external cancellation request was received."""
+        if self._should_cancel_callback and self._should_cancel_callback():
+            raise ScraperException("Scraping job cancelled")
     
     def _initialize_browser_components(self, playwright) -> None:
         """Initialize browser and related components."""
@@ -256,6 +266,7 @@ class GoogleMapsScraper:
             context_logger.info(f"Coverage mode: targeting {results_per_cell} results per cell across {total_cells} cells")
         
         for cell in grid_navigator.grid_cells:
+            self._check_cancelled()
             # Skip completed cells
             if progress.is_cell_completed(cell.id):
                 context_logger.info(f"Skipping completed cell {cell.id}")
@@ -352,6 +363,7 @@ class GoogleMapsScraper:
         cell_start_count = progress.results_count
         
         for idx, url in enumerate(listing_urls):
+            self._check_cancelled()
             # Check if we've reached cell target
             if processed_count >= cell_target:
                 cell_logger.info(f"Reached cell target of {cell_target} results")
@@ -391,6 +403,7 @@ class GoogleMapsScraper:
             True if listing was processed successfully
         """
         try:
+            self._check_cancelled()
             # Navigate to business
             if not self.page_navigator.navigate_to_business(url):
                 logger.warning(f"Failed to navigate to business: {url[:50]}...")
@@ -398,6 +411,7 @@ class GoogleMapsScraper:
             
             # Extract business data
             business = self.business_scraper.extract_data(url)
+            self._check_cancelled()
             
             if not business.name or business.name == "Extraction Failed":
                 logger.warning(f"Failed to extract business data from: {url[:50]}...")

@@ -137,6 +137,7 @@ class ScraperManager:
         self.jobs: Dict[str, JobStatus] = {}
         self.job_queue = Queue()
         self.active_threads: Dict[str, threading.Thread] = {}
+        self.cancel_events: Dict[str, threading.Event] = {}
         self.lock = threading.Lock()
         
         # Start the job processor thread
@@ -173,6 +174,7 @@ class ScraperManager:
         
         with self.lock:
             self.jobs[job_id] = job_status
+            self.cancel_events[job_id] = threading.Event()
             self.job_queue.put(job_id)
         
         return job_id
@@ -190,6 +192,8 @@ class ScraperManager:
                 job.end_time = datetime.now().isoformat()
                 return True
             elif job.status == 'running':
+                if job_id in self.cancel_events:
+                    self.cancel_events[job_id].set()
                 job.status = 'cancelled'
                 job.end_time = datetime.now().isoformat()
                 # Note: We can't easily stop the scraper thread once started
@@ -203,12 +207,14 @@ class ScraperManager:
         with self.lock:
             return self.jobs.get(job_id)
     
-    def list_jobs(self, limit: int = 50) -> List[JobStatus]:
+    def list_jobs(self, limit: Optional[int] = 50) -> List[JobStatus]:
         """List all jobs, most recent first."""
         with self.lock:
             jobs = list(self.jobs.values())
             # Sort by start time, most recent first
             jobs.sort(key=lambda j: j.start_time or '0000-00-00', reverse=True)
+            if limit is None or limit <= 0:
+                return jobs
             return jobs[:limit]
     
     def get_active_jobs(self) -> List[JobStatus]:
@@ -242,7 +248,7 @@ class ScraperManager:
             for job_id in to_remove:
                 del self.jobs[job_id]
     
-    def get_job_results(self, job_id: str) -> Dict[str, str]:
+    def get_job_results(self, job_id: str) -> Dict[str, Optional[str]]:
         """Get file paths for job results."""
         job = self.get_job_status(job_id)
         if not job or job.status != 'completed':
@@ -371,6 +377,10 @@ class ScraperManager:
                 return result
             
             scraper.progress_tracker.increment_results_count = monitored_increment
+
+            def should_cancel() -> bool:
+                event = self.cancel_events.get(job_id)
+                return bool(event and event.is_set())
             
             # Run the scraper
             scraper.run(
@@ -378,17 +388,25 @@ class ScraperManager:
                 total_results=config.total_results,
                 bounds=config.bounds,
                 grid_size=config.grid_size,
-                scraping_mode=config.scraping_mode
+                scraping_mode=config.scraping_mode,
+                should_cancel=should_cancel
             )
+
+            if should_cancel():
+                with self.lock:
+                    job = self.jobs[job_id]
+                    job.status = 'cancelled'
+                    job.end_time = datetime.now().isoformat()
+                return
             
             # Mark job as completed
             with self.lock:
                 job = self.jobs[job_id]
                 job.status = 'completed'
                 job.end_time = datetime.now().isoformat()
-                job.results_file = results_file
-                job.reviews_file = reviews_file
-                job.log_file = log_file
+                job.results_file = str(Path(results_file).expanduser().resolve())
+                job.reviews_file = str(Path(reviews_file).expanduser().resolve())
+                job.log_file = str(Path(log_file).expanduser().resolve())
                 
                 # Final progress update
                 job.progress['percentage'] = 100
@@ -398,15 +416,22 @@ class ScraperManager:
             # Mark job as failed
             with self.lock:
                 job = self.jobs[job_id]
-                job.status = 'failed'
+                cancel_event = self.cancel_events.get(job_id)
+                if cancel_event and cancel_event.is_set():
+                    job.status = 'cancelled'
+                    job.error_message = None
+                else:
+                    job.status = 'failed'
+                    job.error_message = str(e)
                 job.end_time = datetime.now().isoformat()
-                job.error_message = str(e)
         
         finally:
             # Clean up thread reference
             with self.lock:
                 if job_id in self.active_threads:
                     del self.active_threads[job_id]
+                if job_id in self.cancel_events and self.jobs.get(job_id, None) and self.jobs[job_id].status != 'running':
+                    del self.cancel_events[job_id]
 
     def _run_owner_enrichment_job(self, job_id: str, job_config: JobConfig) -> None:
         if job_config.owner_in_place and job_config.owner_resume:
@@ -462,6 +487,9 @@ class ScraperManager:
         )
 
         def progress(stats: Dict[str, int]) -> None:
+            cancel_event = self.cancel_events.get(job_id)
+            if cancel_event and cancel_event.is_set():
+                raise ScraperException("Owner enrichment job cancelled")
             processed = stats.get('processed_rows', 0)
             owners = stats.get('owners_found', 0)
             percentage = 0
@@ -475,11 +503,21 @@ class ScraperManager:
 
         result = enricher.enrich(options, progress_callback=progress)
 
+        cancel_event = self.cancel_events.get(job_id)
+        if cancel_event and cancel_event.is_set():
+            with self.lock:
+                job = self.jobs[job_id]
+                job.status = 'cancelled'
+                job.end_time = datetime.now().isoformat()
+                job.error_message = None
+            return
+
         with self.lock:
             job = self.jobs[job_id]
             job.status = 'completed'
             job.end_time = datetime.now().isoformat()
-            job.results_file = str(result.output_path) if result.output_path else str(output_path)
+            resolved_output = result.output_path if result.output_path else output_path
+            job.results_file = str(Path(resolved_output).expanduser().resolve())
             job.error_message = None
             job.progress.update({
                 'processed_rows': result.processed_rows,

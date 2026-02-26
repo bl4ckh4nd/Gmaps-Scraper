@@ -325,12 +325,19 @@
                                                 <h4>${typeLabels[type] || type}</h4>
                                                 <p>Size: ${formatFileSize(fileInfo.size)}</p>
                                                 <p>Modified: ${formatDateTime(fileInfo.modified)}</p>
-                                                ${fileInfo.row_count ? `<p>Rows: ${fileInfo.row_count.toLocaleString()}</p>` : ''}
+                                                ${typeof fileInfo.row_count === 'number' ? `<p>Rows: ${fileInfo.row_count.toLocaleString()}</p>` : ''}
                                             </div>
-                                            <a href="/api/jobs/${jobId}/download/${type}" 
-                                               class="btn btn-primary btn-sm">
-                                                <i class="fas fa-download"></i> Download
-                                            </a>
+                                            <div class="file-actions">
+                                                <a href="${fileInfo.download_url || `/api/jobs/${jobId}/download/${type}`}" 
+                                                   class="btn btn-primary btn-sm">
+                                                    <i class="fas fa-download"></i> Download
+                                                </a>
+                                                ${type !== 'log_file' ? `
+                                                    <a href="/results/${jobId}" class="btn btn-secondary btn-sm">
+                                                        <i class="fas fa-eye"></i> View Leads
+                                                    </a>
+                                                ` : ''}
+                                            </div>
                                         </div>
                                     `;
                                 }).join('')}

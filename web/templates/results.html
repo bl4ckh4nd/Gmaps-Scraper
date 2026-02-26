@@ -174,6 +174,11 @@
         const jobId = '{{ job_id }}';
         let jobData = null;
         let resultsData = null;
+        const PREVIEW_LIMIT = 50;
+        const previewOffsets = {
+            business_data: 0,
+            reviews_data: 0
+        };
 
         // Initialize results viewer
         document.addEventListener('DOMContentLoaded', function() {
@@ -193,9 +198,7 @@
                 // Display data
                 displayResultsSummary();
                 displayDataFiles();
-                
-                // Load data previews (optional)
-                // await loadDataPreviews();
+                await autoLoadDefaultPreview();
                 
             } catch (error) {
                 console.error('Error initializing results viewer:', error);
@@ -376,16 +379,16 @@
                             <p>${typeInfo.description}</p>
                             <div class="file-stats">
                                 <span><strong>Size:</strong> ${formatFileSize(fileInfo.size)}</span>
-                                ${fileInfo.row_count ? `<span><strong>Records:</strong> ${fileInfo.row_count.toLocaleString()}</span>` : ''}
+                                ${typeof fileInfo.row_count === 'number' ? `<span><strong>Records:</strong> ${fileInfo.row_count.toLocaleString()}</span>` : ''}
                                 <span><strong>Modified:</strong> ${formatDateTime(fileInfo.modified)}</span>
                             </div>
                         </div>
                         <div class="file-actions">
-                            <a href="/api/jobs/${jobId}/download/${type}" 
+                            <a href="${fileInfo.download_url || `/api/jobs/${jobId}/download/${type}`}" 
                                class="btn btn-primary btn-sm">
                                 <i class="fas fa-download"></i> Download
                             </a>
-                            ${type !== 'log_file' && fileInfo.row_count ? `
+                            ${type !== 'log_file' ? `
                                 <button onclick="previewData('${type}')" class="btn btn-secondary btn-sm">
                                     <i class="fas fa-eye"></i> Preview
                                 </button>
@@ -397,30 +400,153 @@
         }
 
         async function previewData(fileType) {
-            showToast('Data preview not implemented yet', 'info');
-            // In a full implementation, this would fetch and display a sample of the data
+            try {
+                const offset = previewOffsets[fileType] || 0;
+                const response = await fetch(
+                    `/api/jobs/${jobId}/preview/${fileType}?limit=${PREVIEW_LIMIT}&offset=${offset}`
+                );
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load preview data');
+                }
+
+                renderPreviewTable(fileType, data);
+            } catch (error) {
+                console.error(`Error previewing ${fileType}:`, error);
+                showToast(error.message || 'Failed to load preview', 'error');
+            }
+        }
+
+        async function autoLoadDefaultPreview() {
+            if (!resultsData || !resultsData.files) {
+                return;
+            }
+
+            if (resultsData.files.business_data) {
+                await previewData('business_data');
+            } else if (resultsData.files.reviews_data) {
+                await previewData('reviews_data');
+            }
+        }
+
+        function renderPreviewTable(fileType, previewData) {
+            const isBusiness = fileType === 'business_data';
+            const card = document.getElementById(isBusiness ? 'business-preview' : 'reviews-preview');
+            const otherCard = document.getElementById(isBusiness ? 'reviews-preview' : 'business-preview');
+            const tableId = isBusiness ? 'business-table' : 'reviews-table';
+            const table = document.getElementById(tableId);
+            const thead = table.querySelector('thead');
+            const tbody = table.querySelector('tbody');
+
+            const columns = previewData.columns || [];
+            const rows = previewData.rows || [];
+
+            card.style.display = 'block';
+            if (otherCard) {
+                otherCard.style.display = 'none';
+            }
+
+            if (columns.length === 0) {
+                thead.innerHTML = '';
+                tbody.innerHTML = `
+                    <tr>
+                        <td>No columns found in CSV.</td>
+                    </tr>
+                `;
+                return;
+            }
+
+            thead.innerHTML = `<tr>${columns.map(col => `<th>${escapeHtml(col)}</th>`).join('')}</tr>`;
+
+            if (rows.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="${columns.length}">No rows to display.</td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = rows.map(row => `
+                <tr>
+                    ${columns.map(col => `<td>${formatCellValue(row[col])}</td>`).join('')}
+                </tr>
+            `).join('');
+
+            const currentOffset = previewData.offset || 0;
+            const totalRows = previewData.total_rows || rows.length;
+            previewOffsets[fileType] = currentOffset;
+            renderPreviewPagination(card, fileType, currentOffset, rows.length, totalRows, !!previewData.has_more);
+        }
+
+        function renderPreviewPagination(card, fileType, offset, visibleRows, totalRows, hasMore) {
+            const existing = card.querySelector('.preview-pagination');
+            if (existing) {
+                existing.remove();
+            }
+
+            const pagination = document.createElement('div');
+            pagination.className = 'preview-pagination';
+
+            const from = totalRows === 0 ? 0 : offset + 1;
+            const to = Math.min(offset + visibleRows, totalRows);
+
+            pagination.innerHTML = `
+                <div class="file-stats" style="margin-top: 0.75rem;">
+                    <span><strong>Showing:</strong> ${from}-${to} of ${totalRows}</span>
+                </div>
+                <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
+                    <button class="btn btn-secondary btn-sm" ${offset <= 0 ? 'disabled' : ''} onclick="changePreviewPage('${fileType}', -1)">
+                        <i class="fas fa-arrow-left"></i> Previous
+                    </button>
+                    <button class="btn btn-secondary btn-sm" ${!hasMore ? 'disabled' : ''} onclick="changePreviewPage('${fileType}', 1)">
+                        Next <i class="fas fa-arrow-right"></i>
+                    </button>
+                </div>
+            `;
+
+            card.querySelector('.card-body').appendChild(pagination);
+        }
+
+        async function changePreviewPage(fileType, direction) {
+            const nextOffset = Math.max(0, (previewOffsets[fileType] || 0) + (direction * PREVIEW_LIMIT));
+            previewOffsets[fileType] = nextOffset;
+            await previewData(fileType);
+        }
+
+        function formatCellValue(value) {
+            if (value === null || value === undefined || value === '') {
+                return '';
+            }
+            const text = String(value);
+            const escaped = escapeHtml(text);
+            if (isUrl(text)) {
+                return `<a class="cell-url" href="${escaped}" target="_blank" rel="noopener noreferrer">${escaped}</a>`;
+            }
+            return escaped;
+        }
+
+        function escapeHtml(text) {
+            return String(text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function isUrl(value) {
+            return typeof value === 'string' && /^https?:\/\//i.test(value);
         }
 
         async function downloadAllResults() {
-            const files = resultsData.files;
-            let downloadCount = 0;
-            
-            for (const [type, fileInfo] of Object.entries(files)) {
-                if (fileInfo) {
-                    setTimeout(() => {
-                        const link = document.createElement('a');
-                        link.href = `/api/jobs/${jobId}/download/${type}`;
-                        link.download = `${jobId}_${type}.csv`;
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                    }, downloadCount * 1000); // Stagger downloads
-                    
-                    downloadCount++;
-                }
-            }
-            
-            showToast(`Starting download of ${downloadCount} files`, 'success');
+            const link = document.createElement('a');
+            link.href = `/api/jobs/${jobId}/download/all`;
+            link.download = `${jobId}_results.zip`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            showToast('ZIP download started', 'success');
         }
 
         async function refreshResults() {
@@ -429,6 +555,7 @@
                 await loadResultsData();
                 displayResultsSummary();
                 displayDataFiles();
+                await autoLoadDefaultPreview();
                 showToast('Results refreshed', 'success');
             } catch (error) {
                 console.error('Error refreshing results:', error);

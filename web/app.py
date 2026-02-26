@@ -1,5 +1,7 @@
 """Flask API for Google Maps Scraper Web Interface."""
 
+import csv
+import io
 import json
 import os
 import time
@@ -8,9 +10,11 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import sys
+import threading
+import zipfile
 from typing import Any, Dict, Optional, Tuple
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file, url_for
 from flask_cors import CORS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,12 +31,14 @@ from src.utils import load_dotenv, upsert_env_file
 
 # Configure Flask app
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "your-secret-key-change-in-production"
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 CORS(app)  # Enable CORS for all domains
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+_row_count_cache_lock = threading.Lock()
+_csv_row_count_cache: Dict[str, Dict[str, Any]] = {}
 
 # Load .env so environment variables (OpenRouter key, etc.) are available to the app.
 DOTENV_PATH = PROJECT_ROOT / ".env"
@@ -101,6 +107,78 @@ def job_status_to_dict(job_status: JobStatus) -> Dict[str, Any]:
     data['elapsed_time'] = job_status.get_elapsed_time()
     data['estimated_remaining'] = job_status.get_estimated_remaining()
     return data
+
+
+def _count_csv_rows(path: str) -> Optional[int]:
+    """Count data rows in a CSV file (excluding header)."""
+    try:
+        with open(path, 'r', encoding='utf-8-sig', newline='') as handle:
+            reader = csv.reader(handle)
+            next(reader, None)  # Skip header row if present.
+            return sum(1 for _ in reader)
+    except Exception:
+        return None
+
+
+def _get_cached_csv_row_count(path: str) -> Optional[int]:
+    """Return cached CSV row count if file signature matches; otherwise recompute."""
+    try:
+        resolved = str(Path(path).expanduser().resolve())
+        stat = os.stat(resolved)
+        signature = (stat.st_size, stat.st_mtime_ns)
+    except Exception:
+        return None
+
+    with _row_count_cache_lock:
+        cached = _csv_row_count_cache.get(resolved)
+        if cached and cached.get('signature') == signature:
+            return cached.get('row_count')
+
+    row_count = _count_csv_rows(resolved)
+    if row_count is None:
+        return None
+
+    with _row_count_cache_lock:
+        _csv_row_count_cache[resolved] = {
+            'signature': signature,
+            'row_count': row_count
+        }
+
+    return row_count
+
+
+def _read_csv_preview(path: str, limit: int, offset: int, total_rows: Optional[int] = None) -> Dict[str, Any]:
+    """Read a paginated preview from a CSV file."""
+    columns: list[str] = []
+    rows: list[Dict[str, Any]] = []
+
+    with open(path, 'r', encoding='utf-8-sig', newline='') as handle:
+        reader = csv.DictReader(handle)
+        columns = reader.fieldnames or []
+
+        for index, row in enumerate(reader):
+            if index < offset:
+                continue
+            if len(rows) < limit:
+                rows.append(row)
+                continue
+            # If total rows is already known from cache, stop once page is filled.
+            if total_rows is not None:
+                break
+
+    if total_rows is None:
+        total_rows = _get_cached_csv_row_count(path)
+    if total_rows is None:
+        total_rows = _count_csv_rows(path)
+    if total_rows is None:
+        total_rows = offset + len(rows)
+
+    return {
+        'columns': columns,
+        'rows': rows,
+        'total_rows': total_rows,
+        'has_more': (offset + len(rows)) < total_rows
+    }
 
 
 def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Optional[str]]:
@@ -533,17 +611,50 @@ def list_jobs():
     """List all jobs."""
     try:
         limit = request.args.get('limit', 50, type=int)
-        status_filter = request.args.get('status')  # pending, running, completed, failed, cancelled
-        
-        jobs = scraper_manager.list_jobs(limit=limit)
-        
-        # Apply status filter if provided
+        if limit is None or limit < 1:
+            limit = 50
+        limit = min(limit, 200)
+
+        page = request.args.get('page', 1, type=int)
+        if page is None or page < 1:
+            page = 1
+
+        status_filter = (request.args.get('status') or '').strip()
+        job_type_filter = (request.args.get('job_type') or '').strip()
+        search_term_filter = (request.args.get('search_term') or '').strip().lower()
+
+        jobs = scraper_manager.list_jobs(limit=None)
+
         if status_filter:
-            jobs = [job for job in jobs if job.status == status_filter]
-        
+            statuses = {item.strip() for item in status_filter.split(',') if item.strip()}
+            valid_statuses = {'pending', 'running', 'completed', 'failed', 'cancelled'}
+            statuses = statuses.intersection(valid_statuses)
+            if statuses:
+                jobs = [job for job in jobs if job.status in statuses]
+
+        if job_type_filter:
+            jobs = [
+                job for job in jobs
+                if getattr(job.config, 'job_type', '') == job_type_filter
+            ]
+
+        if search_term_filter:
+            jobs = [
+                job for job in jobs
+                if search_term_filter in (getattr(job.config, 'search_term', '') or '').lower()
+            ]
+
+        total_count = len(jobs)
+        start = (page - 1) * limit
+        end = start + limit
+        jobs = jobs[start:end]
+
         return jsonify({
             'jobs': [job_status_to_dict(job) for job in jobs],
-            'total': len(jobs)
+            'total': total_count,
+            'page': page,
+            'limit': limit,
+            'has_more': end < total_count
         })
         
     except Exception as e:
@@ -644,11 +755,15 @@ def get_job_results(job_id):
         for file_type, file_path in results.items():
             if file_path and os.path.exists(file_path):
                 stat = os.stat(file_path)
-                file_info[file_type] = {
+                metadata = {
                     'path': file_path,
                     'size': stat.st_size,
-                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    'download_url': url_for('download_job_file', job_id=job_id, file_type=file_type)
                 }
+                if file_path.endswith('.csv'):
+                    metadata['row_count'] = _get_cached_csv_row_count(file_path)
+                file_info[file_type] = metadata
             else:
                 file_info[file_type] = None
         
@@ -661,6 +776,49 @@ def get_job_results(job_id):
     except Exception as e:
         logger.error(f"Error getting results for job {job_id}: {e}")
         return jsonify({'error': 'Failed to get job results'}), 500
+
+
+@app.route('/api/jobs/<job_id>/preview/<file_type>', methods=['GET'])
+def get_job_file_preview(job_id, file_type):
+    """Return a paginated CSV preview for completed jobs."""
+    try:
+        job = scraper_manager.get_job_status(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+
+        if job.status != 'completed':
+            return jsonify({'error': 'Job not completed yet'}), 400
+
+        if file_type not in {'business_data', 'reviews_data'}:
+            return jsonify({'error': 'Preview is only available for CSV data files'}), 400
+
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        if limit is None or limit < 1 or limit > 200:
+            return jsonify({'error': 'limit must be between 1 and 200'}), 400
+        if offset is None or offset < 0:
+            return jsonify({'error': 'offset must be 0 or greater'}), 400
+
+        results = scraper_manager.get_job_results(job_id)
+        file_path = results.get(file_type)
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': 'File not found'}), 404
+        if not file_path.endswith('.csv'):
+            return jsonify({'error': 'Only CSV files can be previewed'}), 400
+
+        total_rows = _get_cached_csv_row_count(file_path)
+        preview = _read_csv_preview(file_path, limit=limit, offset=offset, total_rows=total_rows)
+        return jsonify({
+            'job_id': job_id,
+            'file_type': file_type,
+            'offset': offset,
+            'limit': limit,
+            **preview
+        })
+
+    except Exception as e:
+        logger.error(f"Error previewing file {file_type} for job {job_id}: {e}")
+        return jsonify({'error': 'Failed to preview file'}), 500
 
 
 @app.route('/api/jobs/<job_id>/download/<file_type>')
@@ -692,6 +850,46 @@ def download_job_file(job_id, file_type):
     except Exception as e:
         logger.error(f"Error downloading file {file_type} for job {job_id}: {e}")
         return jsonify({'error': 'Failed to download file'}), 500
+
+
+@app.route('/api/jobs/<job_id>/download/all')
+def download_all_job_files(job_id):
+    """Download all available result files for a completed job as a ZIP archive."""
+    try:
+        job = scraper_manager.get_job_status(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+
+        if job.status != 'completed':
+            return jsonify({'error': 'Job not completed yet'}), 400
+
+        results = scraper_manager.get_job_results(job_id)
+        existing_files = []
+        for file_type, file_path in results.items():
+            if file_path and os.path.exists(file_path):
+                existing_files.append((file_type, file_path))
+
+        if not existing_files:
+            return jsonify({'error': 'No downloadable files found'}), 404
+
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, mode='w', compression=zipfile.ZIP_DEFLATED) as archive:
+            for file_type, file_path in existing_files:
+                suffix = Path(file_path).suffix or ''
+                archive_name = f"{job_id}_{file_type}{suffix}"
+                archive.write(file_path, arcname=archive_name)
+
+        archive_buffer.seek(0)
+        return send_file(
+            archive_buffer,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f"{job_id}_results.zip"
+        )
+
+    except Exception as e:
+        logger.error(f"Error downloading all files for job {job_id}: {e}")
+        return jsonify({'error': 'Failed to download files'}), 500
 
 
 @app.route('/api/jobs/<job_id>/stats')

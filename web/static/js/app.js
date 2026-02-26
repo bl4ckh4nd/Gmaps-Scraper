@@ -6,6 +6,7 @@ let mapInitialized = false;
 let boundsRectangle = null;
 let activeJobEventSources = new Map();
 let lastJobsUpdate = 0;
+let currentJobStatusFilter = '';
 
 // Configuration
 const CONFIG = {
@@ -693,22 +694,30 @@ function updateSettingsUI(data) {
 // Job management
 async function loadJobs() {
     try {
-        const response = await fetch('/api/jobs?limit=50');
-        const data = await response.json();
-        
-        if (response.ok) {
-            const activeJobs = data.jobs.filter(job => job.status === 'running' || job.status === 'pending');
-            const completedJobs = data.jobs.filter(job => job.status !== 'running' && job.status !== 'pending');
-            
-            displayActiveJobs(activeJobs);
-            displayCompletedJobs(completedJobs);
-            
-            // Setup real-time monitoring for active jobs
-            setupRealTimeMonitoring(activeJobs);
-            
-        } else {
-            throw new Error(data.error || 'Failed to load jobs');
+        const completedStatusQuery = currentJobStatusFilter || 'completed,failed,cancelled';
+        const [activeResponse, completedResponse] = await Promise.all([
+            fetch('/api/jobs?limit=50&status=running,pending'),
+            fetch(`/api/jobs?limit=50&status=${encodeURIComponent(completedStatusQuery)}`)
+        ]);
+
+        const activeData = await activeResponse.json();
+        const completedData = await completedResponse.json();
+
+        if (!activeResponse.ok) {
+            throw new Error(activeData.error || 'Failed to load active jobs');
         }
+        if (!completedResponse.ok) {
+            throw new Error(completedData.error || 'Failed to load completed jobs');
+        }
+
+        const activeJobs = activeData.jobs || [];
+        const completedJobs = completedData.jobs || [];
+
+        displayActiveJobs(activeJobs);
+        displayCompletedJobs(completedJobs);
+
+        // Setup real-time monitoring for active jobs
+        setupRealTimeMonitoring(activeJobs);
     } catch (error) {
         console.error('Error loading jobs:', error);
         showToast('Error loading jobs', 'error');
@@ -889,6 +898,9 @@ function createJobElement(job, isActive = false) {
                     <i class="fas fa-info-circle"></i> Details
                 </a>
                 ${job.status === 'completed' ? `
+                    <a href="/results/${job.job_id}" class="btn btn-secondary btn-sm">
+                        <i class="fas fa-table"></i> View Results
+                    </a>
                     <button onclick="downloadResults('${job.job_id}')" class="btn btn-success btn-sm">
                         <i class="fas fa-download"></i> Download
                     </button>
@@ -1072,37 +1084,13 @@ async function cancelJob(jobId) {
 
 async function downloadResults(jobId) {
     try {
-        // Get job results info first
-        const response = await fetch(`/api/jobs/${jobId}/results`);
-        const results = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(results.error || 'Failed to get results info');
-        }
-        
-        // Download business data
-        if (results.files.business_data) {
-            const businessLink = document.createElement('a');
-            businessLink.href = `/api/jobs/${jobId}/download/business_data`;
-            businessLink.download = `${jobId}_business_data.csv`;
-            document.body.appendChild(businessLink);
-            businessLink.click();
-            document.body.removeChild(businessLink);
-        }
-        
-        // Download reviews data if available
-        if (results.files.reviews_data) {
-            setTimeout(() => {
-                const reviewsLink = document.createElement('a');
-                reviewsLink.href = `/api/jobs/${jobId}/download/reviews_data`;
-                reviewsLink.download = `${jobId}_reviews_data.csv`;
-                document.body.appendChild(reviewsLink);
-                reviewsLink.click();
-                document.body.removeChild(reviewsLink);
-            }, 1000);
-        }
-        
-        showToast('Download started', 'success');
+        const link = document.createElement('a');
+        link.href = `/api/jobs/${jobId}/download/all`;
+        link.download = `${jobId}_results.zip`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast('ZIP download started', 'success');
         
     } catch (error) {
         console.error('Error downloading results:', error);
@@ -1140,9 +1128,9 @@ async function refreshRecentJobs() {
 
 // Filter jobs
 function filterJobs() {
-    const statusFilter = document.getElementById('status-filter').value;
-    loadJobs(); // Reload with current filter
-    // Note: In a full implementation, we'd pass the filter to the API
+    const statusFilter = document.getElementById('status-filter').value || '';
+    currentJobStatusFilter = statusFilter;
+    loadJobs();
 }
 
 // Configuration loading
