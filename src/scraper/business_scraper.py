@@ -1,17 +1,20 @@
 """Business information scraper for Google Maps."""
 
 from typing import Optional, List
-import re
 
 from playwright.sync_api import Page
 from ..models.business import Business
 from ..config.selectors import Selectors
 from ..config.settings import ScraperSettings
 from ..utils.helpers import (
-    extract_place_id, clean_website_url, clean_phone_number, 
+    extract_place_id, clean_website_url, clean_phone_number,
     parse_review_count, parse_rating_value, clean_text
 )
-from ..utils.exceptions import ExtractionException
+from ..utils.deleted_review_extraction import (
+    DeletedReviewNotice,
+    extract_deleted_review_notice_text,
+    parse_deleted_review_notice,
+)
 from .base_scraper import BaseScraper
 
 
@@ -43,6 +46,17 @@ class BusinessScraper(BaseScraper):
         try:
             # Extract place ID from URL
             place_id = extract_place_id(maps_url)
+            extraction = self.settings.extraction
+            should_extract_website = (
+                extraction.contact_fields
+                or extraction.website_modernity
+                or self.settings.owner_enrichment.enabled
+            )
+            should_extract_review_summary = (
+                extraction.review_summary
+                or extraction.review_rows
+                or extraction.review_analytics
+            )
             
             # Wait for main business info to load
             self.wait_for_element(self.selectors.BUSINESS_NAME, timeout=10000)
@@ -50,19 +64,35 @@ class BusinessScraper(BaseScraper):
             # Extract basic business information
             business_name = self.get_element_text(self.selectors.BUSINESS_NAME, required=True)
             address = self.get_element_text(self.selectors.BUSINESS_ADDRESS)
-            website = self._extract_website()
-            phone = self._extract_phone()
-            business_type = self.get_element_text(self.selectors.BUSINESS_TYPE)
-            introduction = self._extract_introduction()
+            website = self._extract_website() if should_extract_website else None
+            phone = self._extract_phone() if extraction.contact_fields else None
+            business_type = (
+                self.get_element_text(self.selectors.BUSINESS_TYPE)
+                if extraction.business_details
+                else ""
+            )
+            introduction = self._extract_introduction() if extraction.business_details else "None Found"
             
             # Extract review information
-            review_count, review_average = self._extract_review_info()
+            review_count, review_average = (
+                self._extract_review_info() if should_extract_review_summary else (0, 0.0)
+            )
+
+            deleted_review_notice = (
+                self._extract_deleted_review_notice()
+                if extraction.deleted_review_signals
+                else DeletedReviewNotice()
+            )
             
             # Extract operating hours
-            opens_at = self._extract_opening_hours()
+            opens_at = self._extract_opening_hours() if extraction.business_details else ""
             
             # Extract service information
-            store_shopping, in_store_pickup, store_delivery = self._extract_service_info()
+            store_shopping, in_store_pickup, store_delivery = (
+                self._extract_service_info()
+                if extraction.business_details
+                else ("No", "No", "No")
+            )
             
             # Create and return business instance
             business = Business(
@@ -73,6 +103,9 @@ class BusinessScraper(BaseScraper):
                 phone=phone,
                 review_count=review_count,
                 review_average=review_average,
+                deleted_review_count_min=deleted_review_notice.min_count,
+                deleted_review_count_max=deleted_review_notice.max_count,
+                deleted_review_notice=deleted_review_notice.raw_text,
                 store_shopping=store_shopping,
                 in_store_pickup=in_store_pickup,
                 store_delivery=store_delivery,
@@ -125,33 +158,83 @@ class BusinessScraper(BaseScraper):
         """
         review_count = 0
         review_average = 0.0
-        
-        # Extract review count
-        review_count_text = self.get_element_text(self.selectors.REVIEWS_COUNT)
-        if review_count_text:
+
+        for selector in self.selectors.REVIEW_SUMMARY_ARIA_SELECTORS:
+            summary_aria = self.get_element_attribute(selector, "aria-label")
+            if not summary_aria:
+                continue
+
+            if "rezension" in summary_aria.lower() or "review" in summary_aria.lower():
+                review_count = max(review_count, parse_review_count(summary_aria))
+            if "stern" in summary_aria.lower() or "star" in summary_aria.lower():
+                review_average = max(review_average, parse_rating_value(summary_aria))
+
+        if review_average <= 0:
+            rating_text = self.get_element_attribute(
+                self.selectors.RATING_SELECTOR,
+                "aria-label"
+            )
+            if rating_text:
+                review_average = parse_rating_value(rating_text)
+                self.logger.debug(f"Found rating: {rating_text} -> {review_average}")
+
+        if review_count <= 0:
+            review_count_text = self.get_element_text(self.selectors.REVIEWS_COUNT)
             review_count = parse_review_count(review_count_text)
-            
-            # If we have reviews, try to get the average rating
-            if review_count > 0:
-                # Try multiple selectors for rating
-                rating_text = self.get_element_attribute(
-                    self.selectors.RATING_SELECTOR, 
-                    "aria-label"
-                )
-                
+
+        if review_count <= 0:
+            review_count = self._extract_review_count_from_summary_texts()
+
+        if review_average <= 0:
+            for selector in self.selectors.REVIEWS_AVERAGE:
+                rating_text = self.get_element_text(selector)
                 if rating_text:
                     review_average = parse_rating_value(rating_text)
-                    self.logger.debug(f"Found rating: {rating_text} -> {review_average}")
-                else:
-                    # Try alternative selectors
-                    for selector in self.selectors.REVIEWS_AVERAGE:
-                        rating_text = self.get_element_text(selector)
-                        if rating_text:
-                            review_average = parse_rating_value(rating_text)
-                            if review_average > 0:
-                                break
+                    if review_average > 0:
+                        break
         
         return review_count, review_average
+
+    def _extract_review_count_from_summary_texts(self) -> int:
+        review_count = 0
+
+        for selector in self.selectors.REVIEW_SUMMARY_TEXT_SELECTORS:
+            summary_text = self.get_element_text(selector)
+            if not summary_text:
+                continue
+
+            review_count = max(review_count, parse_review_count(summary_text))
+
+        return review_count
+
+    def _extract_deleted_review_notice(self) -> DeletedReviewNotice:
+        """Extract the deleted-review notice text and normalize its count bounds."""
+
+        candidate_texts = []
+
+        try:
+            selector_text = self.try_multiple_selectors(
+                self.selectors.DELETED_REVIEWS_SELECTORS,
+                "text",
+            )
+            if selector_text:
+                candidate_texts.append(selector_text)
+        except Exception as exc:
+            self.logger.debug(f"Deleted-review selector lookup failed: {exc}")
+
+        try:
+            body_text = self.page.locator("body").inner_text(timeout=self.settings.browser.timeout_short)
+            if body_text:
+                candidate_texts.append(body_text)
+        except Exception as exc:
+            self.logger.debug(f"Deleted-review body scan failed: {exc}")
+
+        for candidate in candidate_texts:
+            notice_text = extract_deleted_review_notice_text(candidate)
+            if notice_text:
+                return parse_deleted_review_notice(notice_text)
+
+        return DeletedReviewNotice()
     
     def _extract_opening_hours(self) -> str:
         """Extract opening hours information."""

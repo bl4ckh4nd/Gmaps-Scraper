@@ -1,0 +1,16 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+artifacts
+sessions
+campaign_runs
+reviews_hash_index.sqlite
+scraper_progress*.json
+scraper_log_*.log
+result*.csv
+reviews*.csv

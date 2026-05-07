@@ -22,10 +22,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scraper_service import JobConfig, JobStatus, scraper_manager
-from src.config import Config
+from src.config import Config, validate_extraction_groups
 from src.config.config_manager import ConfigurationManager
 from src.config.migration import run_migration_if_needed
 from src.services.browser_detector import BrowserDetector
+from src.services.orchestration import use_postgres_runner_mode
 from src.services.system_validation import SystemValidationService
 from src.utils import load_dotenv, upsert_env_file
 
@@ -106,6 +107,8 @@ def job_status_to_dict(job_status: JobStatus) -> Dict[str, Any]:
     data = asdict(job_status)
     data['elapsed_time'] = job_status.get_elapsed_time()
     data['estimated_remaining'] = job_status.get_estimated_remaining()
+    data['available_actions'] = getattr(job_status, 'available_actions', [])
+    data['orchestration'] = getattr(job_status, 'orchestration', None)
     return data
 
 
@@ -256,6 +259,26 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
             if not isinstance(max_reviews, int) or max_reviews < 0:
                 return None, "max_reviews must be a non-negative integer"
 
+        review_mode = data.get('review_mode')
+        if review_mode is None:
+            try:
+                config = Config.from_file(str(Path(__file__).parent.parent / "config.yaml"))
+                review_mode = config.settings.scraping.review_mode
+            except Exception:
+                review_mode = 'all_available'
+        if review_mode not in ['all_available', 'rolling_365d']:
+            return None, "review_mode must be 'all_available' or 'rolling_365d'"
+
+        review_window_days = data.get('review_window_days')
+        if review_window_days is None:
+            try:
+                config = Config.from_file(str(Path(__file__).parent.parent / "config.yaml"))
+                review_window_days = config.settings.scraping.review_window_days
+            except Exception:
+                review_window_days = 365
+        if not isinstance(review_window_days, int) or review_window_days <= 0:
+            return None, "review_window_days must be a positive integer"
+
         headless = data.get('headless', True)
         if not isinstance(headless, bool):
             return None, "headless must be a boolean"
@@ -286,6 +309,42 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
                 if max_pages < 1 or max_pages > 10:
                     return None, "owner_enrichment.max_pages must be between 1 and 10"
 
+        extraction_override = config_overrides.get('extraction')
+        if extraction_override is not None:
+            if not isinstance(extraction_override, dict):
+                return None, "extraction override must be an object"
+
+            extraction_group_keys = {
+                key for key in extraction_override.keys()
+                if key not in {'enabled_groups', 'disabled_groups'}
+            }
+            try:
+                validate_extraction_groups(extraction_group_keys)
+            except ValueError as exc:
+                return None, str(exc)
+
+            for key in extraction_group_keys:
+                if not isinstance(extraction_override[key], bool):
+                    return None, f"extraction.{key} must be a boolean"
+
+            enabled_groups = extraction_override.get('enabled_groups')
+            if enabled_groups is not None:
+                if not isinstance(enabled_groups, list):
+                    return None, "extraction.enabled_groups must be an array"
+                try:
+                    validate_extraction_groups(enabled_groups)
+                except ValueError as exc:
+                    return None, str(exc)
+
+            disabled_groups = extraction_override.get('disabled_groups')
+            if disabled_groups is not None:
+                if not isinstance(disabled_groups, list):
+                    return None, "extraction.disabled_groups must be an array"
+                try:
+                    validate_extraction_groups(disabled_groups)
+                except ValueError as exc:
+                    return None, str(exc)
+
         job_config = JobConfig(
             job_type='scrape',
             search_term=search_term,
@@ -293,6 +352,8 @@ def validate_job_config(data: Dict[str, Any]) -> tuple[Optional[JobConfig], Opti
             bounds=bounds,
             grid_size=grid_size,
             scraping_mode=scraping_mode,
+            review_mode=review_mode,
+            review_window_days=review_window_days,
             max_reviews=max_reviews,
             headless=headless,
             config_overrides=config_overrides
@@ -342,7 +403,10 @@ def health_check():
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'active_jobs': len(scraper_manager.get_active_jobs()),
-        'total_jobs': len(scraper_manager.list_jobs())
+        'total_jobs': len(scraper_manager.list_jobs()),
+        'execution_backend': 'postgres_runner' if use_postgres_runner_mode() else (
+            'rq' if os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"} else 'in_process'
+        ),
     })
 
 
@@ -597,7 +661,7 @@ def start_job():
         
         return jsonify({
             'job_id': job_id,
-            'status': 'pending',
+            'status': 'queued' if (use_postgres_runner_mode() and job_config.job_type == 'scrape') else 'pending',
             'message': 'Job started successfully'
         }), 201
         
@@ -627,7 +691,19 @@ def list_jobs():
 
         if status_filter:
             statuses = {item.strip() for item in status_filter.split(',') if item.strip()}
-            valid_statuses = {'pending', 'running', 'completed', 'failed', 'cancelled'}
+            valid_statuses = {
+                'pending',
+                'queued',
+                'waiting_for_slot',
+                'starting_session',
+                'running',
+                'backoff',
+                'retry_pending',
+                'paused',
+                'completed',
+                'failed',
+                'cancelled',
+            }
             statuses = statuses.intersection(valid_statuses)
             if statuses:
                 jobs = [job for job in jobs if job.status in statuses]
@@ -695,6 +771,39 @@ def cancel_job(job_id):
     except Exception as e:
         logger.error(f"Error cancelling job {job_id}: {e}")
         return jsonify({'error': 'Failed to cancel job'}), 500
+
+
+@app.route('/api/jobs/<job_id>/operations', methods=['GET'])
+def get_job_operations(job_id):
+    """Return orchestration details, artifacts, events, and available actions."""
+    try:
+        job = scraper_manager.get_job_status(job_id)
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+        operations = scraper_manager.get_job_operations(job_id)
+        if operations is None:
+            return jsonify({'error': 'Job operations not available'}), 404
+        return jsonify(operations)
+    except Exception as e:
+        logger.error(f"Error getting job operations for {job_id}: {e}")
+        return jsonify({'error': 'Failed to get job operations'}), 500
+
+
+@app.route('/api/jobs/<job_id>/actions', methods=['POST'])
+def run_job_action(job_id):
+    """Execute an operator action such as retry or restart."""
+    try:
+        payload = request.get_json() or {}
+        action = str(payload.get('action', '')).strip()
+        if not action:
+            return jsonify({'error': 'action is required'}), 400
+        result = scraper_manager.execute_job_action(job_id, action)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error executing job action for {job_id}: {e}")
+        return jsonify({'error': 'Failed to execute job action'}), 500
 
 
 @app.route('/api/jobs/<job_id>/stream')
@@ -986,6 +1095,13 @@ def get_config():
                 "api_key_set": _env_has_key(env_var),
                 "default_model": owner_snapshot["openrouter_default_model"],
                 "allow_free_models_only": owner_snapshot["allow_free_models_only"],
+            },
+            "orchestration": {
+                "backend": 'postgres_runner' if use_postgres_runner_mode() else (
+                    'rq' if os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"} else 'in_process'
+                ),
+                "postgres_runner_enabled": use_postgres_runner_mode(),
+                "rq_enabled": os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"},
             },
         }
     )

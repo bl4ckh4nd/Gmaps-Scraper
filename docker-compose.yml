@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    container_name: gmaps-scraper-postgres
+    environment:
+      POSTGRES_DB: gmaps_scraper
+      POSTGRES_USER: gmaps
+      POSTGRES_PASSWORD: gmaps
+    ports:
+      - "5432:5432"
+    volumes:
+      - gmaps_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gmaps -d gmaps_scraper"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: gmaps-scraper-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - gmaps_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gmaps-scraper-web
+    command: ["/app/docker/entrypoint-web.sh"]
+    environment:
+      DATABASE_URL: postgresql://gmaps:gmaps@postgres:5432/gmaps_scraper
+      REDIS_URL: redis://redis:6379/0
+      SCRAPER_USE_POSTGRES_RUNNER: "1"
+      MAX_ACTIVE_JOBS: "2"
+      MAX_ACTIVE_BROWSER_SESSIONS: "2"
+      SCRAPER_ARTIFACT_ROOT: /data/artifacts
+      SCRAPER_SESSION_ROOT: /data/sessions
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "5000:5000"
+    volumes:
+      - gmaps_app_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/docker/entrypoint-scheduler.sh"]
+    environment:
+      DATABASE_URL: postgresql://gmaps:gmaps@postgres:5432/gmaps_scraper
+      REDIS_URL: redis://redis:6379/0
+      SCRAPER_USE_POSTGRES_RUNNER: "1"
+      MAX_ACTIVE_JOBS: "2"
+      MAX_ACTIVE_BROWSER_SESSIONS: "2"
+      SCRAPER_ARTIFACT_ROOT: /data/artifacts
+      SCRAPER_SESSION_ROOT: /data/sessions
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - gmaps_app_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["/app/docker/entrypoint-runner.sh"]
+    environment:
+      DATABASE_URL: postgresql://gmaps:gmaps@postgres:5432/gmaps_scraper
+      REDIS_URL: redis://redis:6379/0
+      SCRAPER_USE_POSTGRES_RUNNER: "1"
+      MAX_ACTIVE_JOBS: "2"
+      MAX_ACTIVE_BROWSER_SESSIONS: "2"
+      SCRAPER_ARTIFACT_ROOT: /data/artifacts
+      SCRAPER_SESSION_ROOT: /data/sessions
+      RUNNER_HEADED: "true"
+      ENABLE_NOVNC: "true"
+      RUNNER_NOVNC_BASE_URL: http://localhost:7900
+      DISPLAY: :99
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "7900:7900"
+    volumes:
+      - gmaps_app_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  rq-dashboard:
+    image: docker.io/eoranged/rq-dashboard
+    container_name: gmaps-scraper-rq-dashboard
+    profiles: ["legacy-rq"]
+    environment:
+      RQ_DASHBOARD_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "9181:9181"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  gmaps_postgres_data:
+  gmaps_redis_data:
+  gmaps_app_data:

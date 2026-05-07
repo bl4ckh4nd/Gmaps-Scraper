@@ -1,10 +1,22 @@
 """Configuration settings for Google Maps scraper."""
 
 import os
-import yaml
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
 from pathlib import Path
+from typing import Any, Iterable, Mapping, Optional, Tuple
+
+import yaml
+
+
+EXTRACTION_GROUPS = (
+    "contact_fields",
+    "business_details",
+    "review_summary",
+    "review_rows",
+    "review_analytics",
+    "deleted_review_signals",
+    "website_modernity",
+)
 
 
 @dataclass
@@ -12,6 +24,7 @@ class BrowserSettings:
     """Browser configuration settings."""
     executable_path: str = ""
     headless: bool = False
+    session_state_file: str = ""
     timeout_navigation: int = 60000
     timeout_element: int = 10000
     timeout_short: int = 5000
@@ -31,6 +44,27 @@ class ScrapingSettings:
     review_batch_size: int = 10
     default_max_reviews: int = 50
     default_mode: str = 'fast'  # Default scraping mode: 'fast' or 'coverage'
+    review_mode: str = 'all_available'  # 'all_available' or 'rolling_365d'
+    review_window_days: int = 365
+    review_sort_order: str = 'newest'
+
+
+@dataclass
+class ExtractionSettings:
+    """Per-run extraction groups that control optional scraper work."""
+
+    contact_fields: bool = True
+    business_details: bool = True
+    review_summary: bool = True
+    review_rows: bool = True
+    review_analytics: bool = True
+    deleted_review_signals: bool = True
+    website_modernity: bool = False
+
+    def enabled_groups(self) -> tuple[str, ...]:
+        return tuple(
+            group for group in EXTRACTION_GROUPS if bool(getattr(self, group, False))
+        )
 
 
 @dataclass  
@@ -84,9 +118,138 @@ class ScraperSettings:
     """Complete scraper configuration."""
     browser: BrowserSettings = field(default_factory=BrowserSettings)
     scraping: ScrapingSettings = field(default_factory=ScrapingSettings)
+    extraction: ExtractionSettings = field(default_factory=ExtractionSettings)
     grid: GridSettings = field(default_factory=GridSettings)
     files: FileSettings = field(default_factory=FileSettings)
     owner_enrichment: OwnerEnrichmentSettings = field(default_factory=OwnerEnrichmentSettings)
+
+
+def parse_extraction_group_csv(raw_value: Optional[str]) -> tuple[str, ...]:
+    """Parse a comma-separated extraction group string."""
+
+    if raw_value is None:
+        return ()
+
+    return tuple(item.strip() for item in str(raw_value).split(",") if item.strip())
+
+
+def validate_extraction_groups(groups: Iterable[str]) -> tuple[str, ...]:
+    """Validate extraction group names and return them in a stable order."""
+
+    requested = {str(group).strip() for group in groups if str(group).strip()}
+    invalid = sorted(requested.difference(EXTRACTION_GROUPS))
+    if invalid:
+        raise ValueError(
+            "Unknown extraction group(s): "
+            + ", ".join(invalid)
+            + f". Supported groups: {', '.join(EXTRACTION_GROUPS)}"
+        )
+
+    return tuple(group for group in EXTRACTION_GROUPS if group in requested)
+
+
+def apply_extraction_overrides(
+    extraction: ExtractionSettings,
+    *,
+    enabled_groups: Optional[Iterable[str]] = None,
+    disabled_groups: Optional[Iterable[str]] = None,
+    field_overrides: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Apply extraction selection overrides to an ExtractionSettings object."""
+
+    if enabled_groups is not None:
+        normalized_enabled = validate_extraction_groups(enabled_groups)
+        for group in EXTRACTION_GROUPS:
+            setattr(extraction, group, group in normalized_enabled)
+
+    if disabled_groups:
+        normalized_disabled = validate_extraction_groups(disabled_groups)
+        for group in normalized_disabled:
+            setattr(extraction, group, False)
+
+    if not field_overrides:
+        return
+
+    override_groups = {
+        key: value for key, value in field_overrides.items()
+        if key not in {"enabled_groups", "disabled_groups"}
+    }
+    if override_groups:
+        validate_extraction_groups(override_groups.keys())
+        for group, value in override_groups.items():
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"Extraction override '{group}' must be a boolean, got {type(value).__name__}"
+                )
+            setattr(extraction, group, value)
+
+    override_enabled = field_overrides.get("enabled_groups")
+    if override_enabled is not None:
+        if not isinstance(override_enabled, (list, tuple)):
+            raise ValueError("extraction.enabled_groups must be a list of group names")
+        apply_extraction_overrides(extraction, enabled_groups=override_enabled)
+
+    override_disabled = field_overrides.get("disabled_groups")
+    if override_disabled is not None:
+        if not isinstance(override_disabled, (list, tuple)):
+            raise ValueError("extraction.disabled_groups must be a list of group names")
+        apply_extraction_overrides(extraction, disabled_groups=override_disabled)
+
+
+def apply_settings_overrides(settings: ScraperSettings, overrides: Mapping[str, Any]) -> None:
+    """Apply nested runtime overrides onto ScraperSettings."""
+
+    for key, value in overrides.items():
+        if key == "owner_enrichment" and isinstance(value, Mapping):
+            owner_settings = settings.owner_enrichment
+            for sub_key, sub_value in value.items():
+                if hasattr(owner_settings, sub_key):
+                    setattr(owner_settings, sub_key, sub_value)
+            continue
+
+        if key == "extraction" and isinstance(value, Mapping):
+            apply_extraction_overrides(settings.extraction, field_overrides=value)
+            continue
+
+        if hasattr(settings, key):
+            setattr(settings, key, value)
+
+
+def apply_argument_overrides(settings: ScraperSettings, args: Any) -> None:
+    """Apply CLI-style argument overrides onto ScraperSettings."""
+
+    if getattr(args, "headless", None) is not None:
+        settings.browser.headless = args.headless
+    if getattr(args, "browser_state_file", None):
+        settings.browser.session_state_file = args.browser_state_file
+
+    if getattr(args, "max_reviews", None):
+        settings.scraping.max_reviews_per_business = args.max_reviews
+    if getattr(args, "review_mode", None):
+        settings.scraping.review_mode = args.review_mode
+    if getattr(args, "review_window_days", None):
+        settings.scraping.review_window_days = args.review_window_days
+
+    enabled_groups = (
+        parse_extraction_group_csv(getattr(args, "extract", None))
+        if getattr(args, "extract", None) is not None
+        else None
+    )
+    disabled_groups = parse_extraction_group_csv(getattr(args, "skip_extract", None))
+    apply_extraction_overrides(
+        settings.extraction,
+        enabled_groups=enabled_groups,
+        disabled_groups=disabled_groups,
+    )
+
+    if getattr(args, "owner_enrichment", False):
+        settings.owner_enrichment.enabled = True
+
+    if getattr(args, "owner_model", None):
+        settings.owner_enrichment.openrouter_default_model = args.owner_model
+
+    if getattr(args, "owner_max_pages", None):
+        settings.owner_enrichment.max_pages = args.owner_max_pages
 
 
 class Config:
@@ -117,6 +280,7 @@ class Config:
             settings.browser = BrowserSettings(
                 executable_path=browser_data.get('executable_path', settings.browser.executable_path),
                 headless=browser_data.get('headless', settings.browser.headless),
+                session_state_file=browser_data.get('session_state_file', settings.browser.session_state_file),
                 timeout_navigation=browser_data.get('timeout_navigation', settings.browser.timeout_navigation),
                 timeout_element=browser_data.get('timeout_element', settings.browser.timeout_element),
                 timeout_short=browser_data.get('timeout_short', settings.browser.timeout_short),
@@ -136,7 +300,22 @@ class Config:
                 max_reviews_per_business=scraping_data.get('max_reviews_per_business', settings.scraping.max_reviews_per_business),
                 review_batch_size=scraping_data.get('review_batch_size', settings.scraping.review_batch_size),
                 default_max_reviews=scraping_data.get('default_max_reviews', settings.scraping.default_max_reviews),
-                default_mode=scraping_data.get('default_mode', settings.scraping.default_mode)
+                default_mode=scraping_data.get('default_mode', settings.scraping.default_mode),
+                review_mode=scraping_data.get('review_mode', settings.scraping.review_mode),
+                review_window_days=scraping_data.get('review_window_days', settings.scraping.review_window_days),
+                review_sort_order=scraping_data.get('review_sort_order', settings.scraping.review_sort_order),
+            )
+
+        if 'extraction' in config_data:
+            extraction_data = config_data['extraction'] or {}
+            settings.extraction = ExtractionSettings(
+                contact_fields=extraction_data.get('contact_fields', settings.extraction.contact_fields),
+                business_details=extraction_data.get('business_details', settings.extraction.business_details),
+                review_summary=extraction_data.get('review_summary', settings.extraction.review_summary),
+                review_rows=extraction_data.get('review_rows', settings.extraction.review_rows),
+                review_analytics=extraction_data.get('review_analytics', settings.extraction.review_analytics),
+                deleted_review_signals=extraction_data.get('deleted_review_signals', settings.extraction.deleted_review_signals),
+                website_modernity=extraction_data.get('website_modernity', settings.extraction.website_modernity),
             )
         
         # Load grid settings
@@ -190,12 +369,31 @@ class Config:
             settings.browser.executable_path = os.getenv('CHROME_PATH')
         if os.getenv('HEADLESS'):
             settings.browser.headless = os.getenv('HEADLESS').lower() == 'true'
+        if os.getenv('BROWSER_STATE_FILE'):
+            settings.browser.session_state_file = os.getenv('BROWSER_STATE_FILE')
         
         # Scraping settings from env
         if os.getenv('MAX_LISTINGS_PER_CELL'):
             settings.scraping.max_listings_per_cell = int(os.getenv('MAX_LISTINGS_PER_CELL'))
         if os.getenv('MAX_REVIEWS_PER_BUSINESS'):
             settings.scraping.max_reviews_per_business = int(os.getenv('MAX_REVIEWS_PER_BUSINESS'))
+        if os.getenv('REVIEW_MODE'):
+            settings.scraping.review_mode = os.getenv('REVIEW_MODE')
+        if os.getenv('REVIEW_WINDOW_DAYS'):
+            settings.scraping.review_window_days = int(os.getenv('REVIEW_WINDOW_DAYS'))
+
+        extraction_env = os.getenv('EXTRACT_GROUPS')
+        if extraction_env:
+            apply_extraction_overrides(
+                settings.extraction,
+                enabled_groups=parse_extraction_group_csv(extraction_env),
+            )
+        skip_extraction_env = os.getenv('SKIP_EXTRACT_GROUPS')
+        if skip_extraction_env:
+            apply_extraction_overrides(
+                settings.extraction,
+                disabled_groups=parse_extraction_group_csv(skip_extraction_env),
+            )
         
         # Owner enrichment overrides
         if os.getenv('OWNER_ENRICHMENT_ENABLED'):
@@ -219,6 +417,7 @@ class Config:
             'browser': {
                 'executable_path': self.settings.browser.executable_path,
                 'headless': self.settings.browser.headless,
+                'session_state_file': self.settings.browser.session_state_file,
                 'timeout_navigation': self.settings.browser.timeout_navigation,
                 'timeout_element': self.settings.browser.timeout_element,
                 'timeout_short': self.settings.browser.timeout_short,
@@ -233,7 +432,20 @@ class Config:
                 'max_listings_per_cell': self.settings.scraping.max_listings_per_cell,
                 'max_reviews_per_business': self.settings.scraping.max_reviews_per_business,
                 'review_batch_size': self.settings.scraping.review_batch_size,
-                'default_max_reviews': self.settings.scraping.default_max_reviews
+                'default_max_reviews': self.settings.scraping.default_max_reviews,
+                'default_mode': self.settings.scraping.default_mode,
+                'review_mode': self.settings.scraping.review_mode,
+                'review_window_days': self.settings.scraping.review_window_days,
+                'review_sort_order': self.settings.scraping.review_sort_order,
+            },
+            'extraction': {
+                'contact_fields': self.settings.extraction.contact_fields,
+                'business_details': self.settings.extraction.business_details,
+                'review_summary': self.settings.extraction.review_summary,
+                'review_rows': self.settings.extraction.review_rows,
+                'review_analytics': self.settings.extraction.review_analytics,
+                'deleted_review_signals': self.settings.extraction.deleted_review_signals,
+                'website_modernity': self.settings.extraction.website_modernity,
             },
             'grid': {
                 'default_grid_size': self.settings.grid.default_grid_size,

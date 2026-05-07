@@ -7,14 +7,16 @@ let boundsRectangle = null;
 let activeJobEventSources = new Map();
 let lastJobsUpdate = 0;
 let currentJobStatusFilter = '';
+const ACTIVE_JOB_STATUSES = ['pending', 'queued', 'waiting_for_slot', 'starting_session', 'running', 'backoff', 'retry_pending'];
+const TERMINAL_JOB_STATUSES = ['completed', 'failed', 'cancelled'];
 
 // Configuration
 const CONFIG = {
     refreshInterval: 5000, // 5 seconds
     maxToasts: 5,
-    defaultBounds: [52.4, 13.2, 52.6, 13.6], // Berlin area
-    mapCenter: [52.52, 13.405],
-    mapZoom: 11
+    defaultBounds: null,
+    mapCenter: [20, 0],
+    mapZoom: 2
 };
 const TAB_STORAGE_KEY = 'gmaps_scraper_active_tab';
 
@@ -90,8 +92,11 @@ function initializeMapIfNeeded() {
 }
 
 // Initialize the application
-function initializeApp() {
+async function initializeApp() {
     console.log('Initializing Google Maps Scraper Web Interface');
+
+    // Load configuration first so map defaults come from config.yaml.
+    await loadConfiguration();
 
     // Set up tabs and lazy-load heavier UI
     setupTabs();
@@ -116,8 +121,6 @@ function initializeApp() {
         updateHeaderStats();
     }, CONFIG.refreshInterval);
 
-    // Load configuration
-    loadConfiguration();
 }
 
 // Map initialization
@@ -128,7 +131,7 @@ function initializeMap() {
     }
 
     try {
-        // Initialize Leaflet map
+        // Initialize Leaflet map with a neutral fallback center.
         map = L.map('map').setView(CONFIG.mapCenter, CONFIG.mapZoom);
         
         // Add OpenStreetMap tiles
@@ -136,6 +139,12 @@ function initializeMap() {
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
         
+        if (isValidBounds(CONFIG.defaultBounds)) {
+            const [minLat, minLng, maxLat, maxLng] = CONFIG.defaultBounds;
+            const configuredBounds = L.latLngBounds([minLat, minLng], [maxLat, maxLng]);
+            map.fitBounds(configuredBounds);
+        }
+
         // Drawing controls will be enabled via toggle button
         
         console.log('Map initialized successfully');
@@ -144,6 +153,61 @@ function initializeMap() {
         console.error('Error initializing map:', error);
         showToast('Error loading map', 'error');
     }
+}
+
+function normalizeBounds(rawBounds) {
+    if (!Array.isArray(rawBounds) || rawBounds.length !== 4) {
+        return null;
+    }
+
+    const values = rawBounds.map((value) => Number(value));
+    if (values.some((value) => !Number.isFinite(value))) {
+        return null;
+    }
+
+    const [lat1, lng1, lat2, lng2] = values;
+    const minLat = Math.min(lat1, lat2);
+    const minLng = Math.min(lng1, lng2);
+    const maxLat = Math.max(lat1, lat2);
+    const maxLng = Math.max(lng1, lng2);
+
+    if (minLat < -90 || maxLat > 90 || minLng < -180 || maxLng > 180) {
+        return null;
+    }
+    if (minLat >= maxLat || minLng >= maxLng) {
+        return null;
+    }
+
+    return [minLat, minLng, maxLat, maxLng];
+}
+
+function isValidBounds(bounds) {
+    return normalizeBounds(bounds) !== null;
+}
+
+function getCenterFromBounds(bounds) {
+    const normalized = normalizeBounds(bounds);
+    if (!normalized) {
+        return null;
+    }
+
+    const [minLat, minLng, maxLat, maxLng] = normalized;
+    return [(minLat + maxLat) / 2, (minLng + maxLng) / 2];
+}
+
+function applyConfigDefaults(config) {
+    const normalizedBounds = normalizeBounds(config?.default_bounds);
+    if (!normalizedBounds) {
+        return false;
+    }
+
+    CONFIG.defaultBounds = normalizedBounds;
+    const derivedCenter = getCenterFromBounds(normalizedBounds);
+    if (derivedCenter) {
+        CONFIG.mapCenter = derivedCenter;
+    }
+
+    return true;
 }
 
 // Map drawing functionality
@@ -285,6 +349,11 @@ function useDefaultBounds() {
 
     clearBounds();
 
+    if (!isValidBounds(CONFIG.defaultBounds)) {
+        showToast('Default bounds are not configured', 'error');
+        return;
+    }
+
     const [minLat, minLng, maxLat, maxLng] = CONFIG.defaultBounds;
     const bounds = L.latLngBounds([minLat, minLng], [maxLat, maxLng]);
 
@@ -297,7 +366,7 @@ function useDefaultBounds() {
 
     map.fitBounds(bounds);
     updateBoundsInfo();
-    showToast('Using Berlin default bounds', 'info');
+    showToast('Using configured default bounds', 'info');
 }
 
 // Update bounds info display
@@ -433,7 +502,9 @@ function prepareJobConfig(data) {
         total_results: parseInt(data.total_results),
         grid_size: parseInt(data.grid_size),
         headless: data.headless === 'on',
-        scraping_mode: data.scraping_mode || 'fast'
+        scraping_mode: data.scraping_mode || 'fast',
+        review_mode: data.review_mode || 'all_available',
+        review_window_days: parseInt(data.review_window_days || '365', 10)
     };
 
     config.job_type = 'scrape';
@@ -462,6 +533,16 @@ function prepareJobConfig(data) {
     }
 
     const overrides = {};
+    overrides.extraction = {
+        contact_fields: document.getElementById('extract-contact-fields').checked,
+        business_details: document.getElementById('extract-business-details').checked,
+        review_summary: document.getElementById('extract-review-summary').checked,
+        review_rows: document.getElementById('extract-review-rows').checked,
+        review_analytics: document.getElementById('extract-review-analytics').checked,
+        deleted_review_signals: document.getElementById('extract-deleted-review-signals').checked,
+        website_modernity: document.getElementById('extract-website-modernity').checked
+    };
+
     if (data.owner_enrichment === 'on') {
         const ownerOverrides = { enabled: true };
         if (data.owner_model && data.owner_model.trim().length > 0) {
@@ -696,7 +777,7 @@ async function loadJobs() {
     try {
         const completedStatusQuery = currentJobStatusFilter || 'completed,failed,cancelled';
         const [activeResponse, completedResponse] = await Promise.all([
-            fetch('/api/jobs?limit=50&status=running,pending'),
+            fetch(`/api/jobs?limit=50&status=${encodeURIComponent(ACTIVE_JOB_STATUSES.join(','))}`),
             fetch(`/api/jobs?limit=50&status=${encodeURIComponent(completedStatusQuery)}`)
         ]);
 
@@ -764,6 +845,7 @@ function createJobElement(job, isActive = false) {
     const progress = job.progress || {};
     const isOwnerJob = job.config.job_type === 'owner_enrichment';
     const percentage = Math.round(progress.percentage || 0);
+    const orchestration = job.orchestration || null;
 
     const title = isOwnerJob
         ? `Owner enrichment: ${job.config.owner_csv_path || 'Job'}`
@@ -861,6 +943,17 @@ function createJobElement(job, isActive = false) {
         ` : ''
     );
 
+    const orchestrationMarkup = orchestration ? `
+        <div class="cell-distribution">
+            <small class="distribution-summary">
+                <strong>Backend:</strong> ${humanizeStatus(orchestration.backend || 'postgres_runner')}
+                ${orchestration.session?.runner_id ? ` | <strong>Runner:</strong> ${orchestration.session.runner_id}` : ''}
+                ${orchestration.session?.status ? ` | <strong>Session:</strong> ${humanizeStatus(orchestration.session.status)}` : ''}
+                ${orchestration.recommended_action ? ` | <strong>Recommended:</strong> ${humanizeStatus(orchestration.recommended_action)}` : ''}
+            </small>
+        </div>
+    ` : '';
+
     return `
         <div class="job-item" data-job-id="${job.job_id}">
             <div class="job-header">
@@ -892,6 +985,7 @@ function createJobElement(job, isActive = false) {
 
             ${statsMarkup}
             ${ownerExtras}
+            ${orchestrationMarkup}
 
             <div class="job-actions">
                 <a href="/jobs/${job.job_id}" class="btn btn-primary btn-sm">
@@ -905,7 +999,13 @@ function createJobElement(job, isActive = false) {
                         <i class="fas fa-download"></i> Download
                     </button>
                 ` : ''}
-                ${(job.status === 'running' || job.status === 'pending') ? `
+                ${buildJobActionButtons(job)}
+                ${orchestration?.session?.novnc_url ? `
+                    <a href="${orchestration.session.novnc_url}" class="btn btn-secondary btn-sm" target="_blank" rel="noopener noreferrer">
+                        <i class="fas fa-display"></i> Live Session
+                    </a>
+                ` : ''}
+                ${ACTIVE_JOB_STATUSES.includes(job.status) ? `
                     <button onclick="cancelJob('${job.job_id}')" class="btn btn-danger btn-sm">
                         <i class="fas fa-stop"></i> Cancel
                     </button>
@@ -925,7 +1025,7 @@ function setupRealTimeMonitoring(activeJobs) {
     
     // Start monitoring active jobs
     activeJobs.forEach(job => {
-        if (job.status === 'running' || job.status === 'pending') {
+        if (ACTIVE_JOB_STATUSES.includes(job.status)) {
             startJobMonitoring(job.job_id);
         }
     });
@@ -944,7 +1044,7 @@ function startJobMonitoring(jobId) {
             updateJobDisplay(job);
             
             // Stop monitoring if job finished
-            if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+            if (TERMINAL_JOB_STATUSES.includes(job.status)) {
                 eventSource.close();
                 activeJobEventSources.delete(jobId);
                 
@@ -1082,6 +1182,38 @@ async function cancelJob(jobId) {
     }
 }
 
+async function runJobAction(jobId, action, label) {
+    const actionLabel = label || humanizeStatus(action);
+    if (!confirm(`Run action "${actionLabel}" for this job?`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/jobs/${jobId}/actions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ action })
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            showToast(`Action completed: ${actionLabel}`, 'success');
+            setTimeout(() => {
+                loadJobs();
+                updateHeaderStats();
+            }, 500);
+        } else {
+            throw new Error(result.error || `Failed to run ${actionLabel}`);
+        }
+    } catch (error) {
+        console.error('Error running job action:', error);
+        showToast(error.message || `Failed to run ${actionLabel}`, 'error');
+    }
+}
+
 async function downloadResults(jobId) {
     try {
         const link = document.createElement('a');
@@ -1140,19 +1272,35 @@ async function loadConfiguration() {
         const config = await response.json();
         
         if (response.ok) {
-            // Update default bounds if different
-            CONFIG.defaultBounds = config.default_bounds;
+            if (!applyConfigDefaults(config)) {
+                console.warn('Ignoring invalid default bounds from /api/config');
+                updateExecutionBackendBanner(config);
+                return false;
+            }
+            updateExecutionBackendBanner(config);
+
+            if (mapInitialized && map && !boundsRectangle && !isDrawing) {
+                map.setView(CONFIG.mapCenter, CONFIG.mapZoom);
+            }
+            return true;
         }
     } catch (error) {
         console.error('Error loading configuration:', error);
     }
+    return false;
 }
 
 // Utility functions
 function getStatusClass(status) {
     const classes = {
         'pending': 'status-pending',
+        'queued': 'status-pending',
+        'waiting_for_slot': 'status-pending',
+        'starting_session': 'status-running',
         'running': 'status-running',
+        'backoff': 'status-pending',
+        'retry_pending': 'status-pending',
+        'paused': 'status-cancelled',
         'completed': 'status-completed',
         'failed': 'status-failed',
         'cancelled': 'status-cancelled'
@@ -1163,7 +1311,13 @@ function getStatusClass(status) {
 function getStatusIcon(status) {
     const icons = {
         'pending': 'fa-clock',
+        'queued': 'fa-list-check',
+        'waiting_for_slot': 'fa-hourglass-half',
+        'starting_session': 'fa-rocket',
         'running': 'fa-spinner fa-spin',
+        'backoff': 'fa-clock-rotate-left',
+        'retry_pending': 'fa-rotate-right',
+        'paused': 'fa-pause-circle',
         'completed': 'fa-check-circle',
         'failed': 'fa-times-circle',
         'cancelled': 'fa-ban'
@@ -1182,6 +1336,49 @@ function formatFileSize(bytes) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function humanizeStatus(value) {
+    if (!value) return 'N/A';
+    return String(value).replaceAll('_', ' ');
+}
+
+function updateExecutionBackendBanner(config) {
+    const banner = document.getElementById('execution-backend-banner');
+    if (!banner || !config || !config.orchestration) {
+        return;
+    }
+    const orchestration = config.orchestration;
+    const backend = humanizeStatus(orchestration.backend || 'in_process');
+    const hint = orchestration.postgres_runner_enabled
+        ? 'Postgres-first runner mode is active. Jobs are session-bound and centrally throttled.'
+        : orchestration.rq_enabled
+            ? 'Legacy Redis/RQ mode is active. Enable SCRAPER_USE_POSTGRES_RUNNER=1 to switch to the new scheduler/runner stack.'
+            : 'Legacy in-process mode is active. Enable SCRAPER_USE_POSTGRES_RUNNER=1 to migrate to the new scheduler/runner stack.';
+    banner.innerHTML = `<strong>Execution backend:</strong> ${backend} — ${hint}`;
+}
+
+function buildJobActionButtons(job) {
+    const actions = Array.isArray(job.available_actions) ? job.available_actions : [];
+    const labelMap = {
+        retry: 'Retry',
+        restart_from_checkpoint: 'Restart from checkpoint',
+        restart_from_scratch: 'Restart from scratch'
+    };
+    const iconMap = {
+        retry: 'fa-rotate-right',
+        restart_from_checkpoint: 'fa-clock-rotate-left',
+        restart_from_scratch: 'fa-power-off'
+    };
+
+    return actions
+        .filter((action) => action !== 'cancel')
+        .map((action) => `
+            <button onclick="runJobAction('${job.job_id}', '${action}', '${labelMap[action] || humanizeStatus(action)}')" class="btn btn-secondary btn-sm">
+                <i class="fas ${iconMap[action] || 'fa-play'}"></i> ${labelMap[action] || humanizeStatus(action)}
+            </button>
+        `)
+        .join('');
 }
 
 // Loading overlay
@@ -1280,3 +1477,4 @@ window.refreshRecentJobs = refreshRecentJobs;
 window.filterJobs = filterJobs;
 window.cancelJob = cancelJob;
 window.downloadResults = downloadResults;
+window.runJobAction = runJobAction;

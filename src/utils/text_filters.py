@@ -35,8 +35,8 @@ def extract_owner_snippets_with_sources(
 ) -> tuple[str, list[OwnerDocument]]:
     """Reduce crawled documents to the most relevant owner-related snippets."""
 
-    snippets: list[str] = []
-    evidence_documents: list[OwnerDocument] = []
+    prioritized_matches: list[tuple[str, OwnerDocument]] = []
+    fallback_matches: list[tuple[str, OwnerDocument]] = []
     for document in documents:
         content = (document.content or "").strip()
         if not content:
@@ -48,10 +48,19 @@ def extract_owner_snippets_with_sources(
         sample = "\n".join(relevant_lines[:10]) if relevant_lines else "\n".join(lines[:5])
         if sample:
             header = document.title or document.url
-            snippets.append(f"Source: {header}\n{sample}")
-            evidence_documents.append(document)
-        combined = "\n\n".join(snippets)
-        if len(combined) >= max_chars:
+            entry = (f"Source: {header}\n{sample}", document)
+            if relevant_lines:
+                prioritized_matches.append(entry)
+            else:
+                fallback_matches.append(entry)
+
+    selected_matches = prioritized_matches or fallback_matches
+    snippets: list[str] = []
+    evidence_documents: list[OwnerDocument] = []
+    for snippet, document in selected_matches:
+        snippets.append(snippet)
+        evidence_documents.append(document)
+        if len("\n\n".join(snippets)) >= max_chars:
             break
 
     combined = "\n\n".join(snippets)[:max_chars]

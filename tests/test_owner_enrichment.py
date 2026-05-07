@@ -251,7 +251,7 @@ def test_csv_writer_upgrades_legacy_schema(tmp_path):
     write_result = writer.write_business(business)
     assert write_result is True
 
-    upgraded_df = pd.read_csv(output_path)
+    upgraded_df = pd.read_csv(output_path).fillna('')
     assert 'Owner Name' in upgraded_df.columns
     assert upgraded_df.iloc[0]['Owner Name'] == ''
     assert upgraded_df.iloc[1]['Owner Name'] == 'Jane Doe'
@@ -309,7 +309,7 @@ def test_owner_csv_enricher_enriches_rows(tmp_path):
 
     result = enricher.enrich(options)
 
-    enriched_df = pd.read_csv(result.output_path)
+    enriched_df = pd.read_csv(result.output_path).fillna('')
     assert enriched_df.iloc[0]['Owner Name'] == 'Ada Lovelace'
     assert result.owners_found == 1
     assert enricher._owner_service.calls == 1
@@ -457,5 +457,5 @@ def test_owner_csv_enricher_resume_legacy_state_uses_row_checkpoint(tmp_path):
     assert enricher._owner_service.calls == 2
     assert not state_path.exists()
 
-    enriched_df = pd.read_csv(output_path)
+    enriched_df = pd.read_csv(output_path).fillna('')
     assert len(enriched_df) == 3

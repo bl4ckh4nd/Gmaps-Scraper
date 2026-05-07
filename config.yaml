@@ -7,6 +7,9 @@ browser:
   executable_path: ''
   # Run browser in headless mode (true/false)
   headless: false
+  # Optional Playwright storage-state JSON. If empty, the scraper derives one
+  # next to the progress file to persist consent cookies/local storage.
+  session_state_file: ''
   # Navigation timeout in milliseconds
   timeout_navigation: 60000
   # Element wait timeout in milliseconds
@@ -37,7 +40,13 @@ scraping:
   # Default number of reviews if no limit specified
   default_max_reviews: 50
   # Default scraping mode: 'fast' (sequential) or 'coverage' (distributed)
-  default_mode: 'fast'
+  default_mode: 'coverage'
+  # Review collection mode: 'all_available' or 'rolling_365d'
+  review_mode: 'all_available'
+  # Rolling review analysis window in days when review_mode='rolling_365d'
+  review_window_days: 365
+  # Sort order used for rolling review analysis
+  review_sort_order: 'newest'
 
 # Geographic Grid Settings
 grid:

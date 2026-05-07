@@ -25,6 +25,14 @@
     </header>
 
     <div class="container">
+        <div class="card">
+            <div class="card-body">
+                <div id="execution-backend-banner">
+                    <strong>Execution backend:</strong> Loading runtime mode...
+                </div>
+            </div>
+        </div>
+
         <!-- Job Creation Form -->
         <div class="card">
             <div class="card-header">
@@ -111,8 +119,95 @@
                             >
                             <small>Maximum reviews to collect per business</small>
                         </div>
+
+                        <div class="form-group">
+                            <label for="review-mode">
+                                <i class="fas fa-clock"></i> Review Mode
+                            </label>
+                            <select name="review_mode" id="review-mode" class="form-control">
+                                <option value="all_available" selected>All Available Reviews</option>
+                                <option value="rolling_365d">Rolling 365 Days</option>
+                            </select>
+                            <small>Use newest-first review scraping when only the last 12 months matter</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="review-window-days">
+                                <i class="fas fa-calendar-day"></i> Review Window (Days)
+                            </label>
+                            <input
+                                type="number"
+                                id="review-window-days"
+                                name="review_window_days"
+                                min="1"
+                                max="730"
+                                value="365"
+                            >
+                            <small>Used only when Review Mode is set to Rolling 365 Days</small>
+                        </div>
                     </div>
 
+                    <div class="form-group">
+                        <label>
+                            <i class="fas fa-sliders-h"></i> Extraction Options
+                        </label>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-contact-fields" checked>
+                                    <i class="fas fa-address-card"></i> Contact fields
+                                </label>
+                                <small>Website URL and phone number</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-business-details" checked>
+                                    <i class="fas fa-store"></i> Business details
+                                </label>
+                                <small>Type, opening info, introduction, and service flags</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-review-summary" checked>
+                                    <i class="fas fa-star-half-alt"></i> Review summary
+                                </label>
+                                <small>Review count and average rating on the business row</small>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-review-rows" checked>
+                                    <i class="fas fa-comments"></i> Review rows
+                                </label>
+                                <small>Write per-review rows to the reviews CSV</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-review-analytics" checked>
+                                    <i class="fas fa-chart-line"></i> Review analytics
+                                </label>
+                                <small>Reply rates, cadence, and rolling-window metrics</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-deleted-review-signals" checked>
+                                    <i class="fas fa-trash-alt"></i> Deleted-review signals
+                                </label>
+                                <small>Deleted-review notice text and min/max counts</small>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="extract-website-modernity">
+                                    <i class="fas fa-globe"></i> Website modernity check
+                                </label>
+                                <small>Optional homepage probe for HTTPS, mobile, structured-data, and stale/broken-site hints</small>
+                            </div>
+                        </div>
+                    </div>
+ 
                     <div class="form-group">
                         <label>
                             <i class="fas fa-map"></i> Search Area (Optional)
@@ -127,7 +222,7 @@
                                     Clear Selection
                                 </button>
                                 <button type="button" id="use-default-bounds" class="btn btn-secondary">
-                                    Use Berlin (Default)
+                                    Use Default Bounds
                                 </button>
                             </div>
                             <div id="bounds-info" class="bounds-info" style="display: none;">
@@ -297,6 +392,11 @@
                 <div class="card-actions">
                     <select id="status-filter" onchange="filterJobs()">
                         <option value="">All Status</option>
+                        <option value="queued">Queued</option>
+                        <option value="waiting_for_slot">Waiting for slot</option>
+                        <option value="starting_session">Starting session</option>
+                        <option value="backoff">Backoff</option>
+                        <option value="retry_pending">Retry pending</option>
                         <option value="completed">Completed</option>
                         <option value="failed">Failed</option>
                         <option value="cancelled">Cancelled</option>

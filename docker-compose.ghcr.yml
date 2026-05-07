@@ -1,0 +1,15 @@
+services:
+  web:
+    build: null
+    image: ${APP_IMAGE:-ghcr.io/bl4ckh4nd/google-maps-scrapper}:${APP_TAG:-main}
+    pull_policy: always
+
+  scheduler:
+    build: null
+    image: ${APP_IMAGE:-ghcr.io/bl4ckh4nd/google-maps-scrapper}:${APP_TAG:-main}
+    pull_policy: always
+
+  runner:
+    build: null
+    image: ${APP_IMAGE:-ghcr.io/bl4ckh4nd/google-maps-scrapper}:${APP_TAG:-main}
+    pull_policy: always

@@ -70,6 +70,25 @@
             </div>
         </div>
 
+        <div class="card">
+            <div class="card-header">
+                <h2><i class="fas fa-server"></i> Operations</h2>
+            </div>
+            <div class="card-body">
+                <div id="operations-actions" class="job-actions"></div>
+                <div id="operations-details" class="config-grid" style="margin-top: 1rem;"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2><i class="fas fa-stream"></i> Recent Events</h2>
+            </div>
+            <div class="card-body">
+                <div id="operations-events"></div>
+            </div>
+        </div>
+
         <!-- Results Section -->
         <div class="card" id="results-section" style="display: none;">
             <div class="card-header">
@@ -132,14 +151,17 @@
         }
 
         function refreshJobDetails() {
-            fetch(`/api/jobs/${jobId}`)
-                .then(response => response.json())
-                .then(job => {
-                    updateJobOverview(job);
+            Promise.all([
+                fetch(`/api/jobs/${jobId}`).then(response => response.json()),
+                fetch(`/api/jobs/${jobId}/operations`).then(response => response.json())
+            ])
+                .then(([job, operations]) => {
+                    updateJobOverview(job, operations);
                     updateProgressSection(job);
-                    updateConfigDetails(job);
+                    updateConfigDetails(job, operations);
+                    updateOperationsSection(job, operations);
                     updateResultsSection(job);
-                    updateErrorSection(job);
+                    updateErrorSection(job, operations);
                     updateGridVisualization(job);
                     
                     lastStatus = job.status;
@@ -150,7 +172,7 @@
                 });
         }
 
-        function updateJobOverview(job) {
+        function updateJobOverview(job, operations) {
             const title = document.getElementById('job-title');
             const overview = document.getElementById('job-overview');
             
@@ -194,12 +216,18 @@
                             <span>Est. Remaining: ${job.estimated_remaining}</span>
                         </div>
                     ` : ''}
+                    ${operations?.session?.runner_id ? `
+                        <div class="time-item">
+                            <i class="fas fa-server"></i>
+                            <span>Runner: ${operations.session.runner_id}</span>
+                        </div>
+                    ` : ''}
                 </div>
             `;
 
             // Show/hide cancel button
             const cancelBtn = document.getElementById('cancel-btn');
-            if (job.status === 'running' || job.status === 'pending') {
+            if (['pending', 'queued', 'waiting_for_slot', 'starting_session', 'running', 'backoff', 'retry_pending'].includes(job.status)) {
                 cancelBtn.style.display = 'inline-block';
             } else {
                 cancelBtn.style.display = 'none';
@@ -265,7 +293,7 @@
             `;
         }
 
-        function updateConfigDetails(job) {
+        function updateConfigDetails(job, operations) {
             const config = job.config;
             const content = document.getElementById('config-details');
             
@@ -294,7 +322,70 @@
                     <label>Search Bounds:</label>
                     <span>${config.bounds ? `[${config.bounds.join(', ')}]` : 'Global'}</span>
                 </div>
+                <div class="config-item">
+                    <label>Execution Backend:</label>
+                    <span>${humanizeStatus(operations?.backend || (job.orchestration?.backend || 'legacy'))}</span>
+                </div>
             `;
+        }
+
+        function updateOperationsSection(job, operations) {
+            const actions = document.getElementById('operations-actions');
+            const details = document.getElementById('operations-details');
+            const events = document.getElementById('operations-events');
+
+            const availableActions = operations?.available_actions || [];
+            const labelMap = {
+                retry: 'Retry',
+                restart_from_checkpoint: 'Restart from checkpoint',
+                restart_from_scratch: 'Restart from scratch'
+            };
+
+            actions.innerHTML = availableActions
+                .filter((action) => action !== 'cancel')
+                .map((action) => `
+                    <button class="btn btn-secondary btn-sm" onclick="runJobAction('${action}', '${labelMap[action] || humanizeStatus(action)}')">
+                        <i class="fas fa-play"></i> ${labelMap[action] || humanizeStatus(action)}
+                    </button>
+                `)
+                .join('');
+
+            details.innerHTML = `
+                <div class="config-item">
+                    <label>Current Run ID:</label>
+                    <span>${operations?.current_run_id || 'N/A'}</span>
+                </div>
+                <div class="config-item">
+                    <label>Failure Category:</label>
+                    <span>${operations?.failure_category || 'N/A'}</span>
+                </div>
+                <div class="config-item">
+                    <label>Recommended Action:</label>
+                    <span>${humanizeStatus(operations?.recommended_action || 'none')}</span>
+                </div>
+                <div class="config-item">
+                    <label>Checkpoint:</label>
+                    <span>${operations?.checkpoint ? 'Available' : 'None'}</span>
+                </div>
+                <div class="config-item">
+                    <label>Session Status:</label>
+                    <span>${humanizeStatus(operations?.session?.status || 'none')}</span>
+                </div>
+                <div class="config-item">
+                    <label>Live Session:</label>
+                    <span>${operations?.session?.novnc_url ? `<a href="${operations.session.novnc_url}" target="_blank" rel="noopener noreferrer">Open noVNC</a>` : 'N/A'}</span>
+                </div>
+            `;
+
+            const recentEvents = operations?.events || [];
+            events.innerHTML = recentEvents.length > 0
+                ? recentEvents.map((event) => `
+                    <div class="config-item" style="margin-bottom: 0.5rem;">
+                        <label>${formatDateTime(event.created_at)}</label>
+                        <span><strong>${humanizeStatus(event.event_type)}</strong>: ${event.message}</span>
+                    </div>
+                `).join('')
+                : '<p>No operation events recorded yet.</p>';
         }
 
         function updateResultsSection(job) {
@@ -352,15 +443,15 @@
             }
         }
 
-        function updateErrorSection(job) {
+        function updateErrorSection(job, operations) {
             const errorSection = document.getElementById('error-section');
             const errorContent = document.getElementById('error-content');
             
-            if (job.status === 'failed' && job.error_message) {
+            if ((job.status === 'failed' || job.status === 'cancelled') && (job.error_message || operations?.failure_reason)) {
                 errorSection.style.display = 'block';
                 errorContent.innerHTML = `
                     <div class="error-message">
-                        <pre>${job.error_message}</pre>
+                        <pre>${job.error_message || operations.failure_reason}</pre>
                     </div>
                 `;
             } else {
@@ -408,7 +499,7 @@
                     updateGridVisualization(job);
                     
                     // Stop streaming if job is finished
-                    if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+                    if (['completed', 'failed', 'cancelled'].includes(job.status)) {
                         eventSource.close();
                         showToast(`Job ${job.status}!`, job.status === 'completed' ? 'success' : 'error');
                     }
@@ -421,7 +512,7 @@
                 console.error('SSE error:', event);
                 // Try to reconnect after a delay
                 setTimeout(() => {
-                    if (lastStatus === 'running') {
+                    if (['pending', 'queued', 'waiting_for_slot', 'starting_session', 'running', 'backoff', 'retry_pending'].includes(lastStatus)) {
                         startRealTimeUpdates();
                     }
                 }, 5000);
@@ -445,11 +536,41 @@
                 });
         }
 
+        function runJobAction(action, label) {
+            if (!confirm(`Run action "${label}" for this job?`)) {
+                return;
+            }
+
+            fetch(`/api/jobs/${jobId}/actions`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action })
+            })
+                .then(response => response.json())
+                .then(result => {
+                    if (result.error) {
+                        throw new Error(result.error);
+                    }
+                    showToast(`Action completed: ${label}`, 'success');
+                    refreshJobDetails();
+                })
+                .catch(error => {
+                    console.error('Error running job action:', error);
+                    showToast(error.message || 'Error running job action', 'error');
+                });
+        }
+
         // Utility functions
         function getStatusClass(status) {
             const classes = {
                 'pending': 'status-pending',
+                'queued': 'status-pending',
+                'waiting_for_slot': 'status-pending',
+                'starting_session': 'status-running',
                 'running': 'status-running', 
+                'backoff': 'status-pending',
+                'retry_pending': 'status-pending',
+                'paused': 'status-cancelled',
                 'completed': 'status-completed',
                 'failed': 'status-failed',
                 'cancelled': 'status-cancelled'
@@ -460,7 +581,13 @@
         function getStatusIcon(status) {
             const icons = {
                 'pending': 'fa-clock',
+                'queued': 'fa-list-check',
+                'waiting_for_slot': 'fa-hourglass-half',
+                'starting_session': 'fa-rocket',
                 'running': 'fa-spinner fa-spin',
+                'backoff': 'fa-clock-rotate-left',
+                'retry_pending': 'fa-rotate-right',
+                'paused': 'fa-pause-circle',
                 'completed': 'fa-check-circle',
                 'failed': 'fa-times-circle', 
                 'cancelled': 'fa-ban'
@@ -479,6 +606,11 @@
             const sizes = ['Bytes', 'KB', 'MB', 'GB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function humanizeStatus(value) {
+            if (!value) return 'N/A';
+            return String(value).replaceAll('_', ' ');
         }
 
         function copyToClipboard(text) {

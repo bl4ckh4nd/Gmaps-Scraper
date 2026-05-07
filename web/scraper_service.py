@@ -17,8 +17,12 @@ parent_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(parent_dir))
 
 from src.google_maps_scraper import GoogleMapsScraper, create_scraper_from_args
-from src.config import Config
+from src.config import Config, apply_settings_overrides
+from src.navigation import GridNavigator
+from src.persistence import OrchestratorStore, PostgresStore
 from src.services import OwnerCSVEnricher, OwnerCSVEnrichmentOptions
+from src.services.queue_service import enqueue_discover_cell
+from src.services.orchestration import use_postgres_runner_mode
 from src.utils.exceptions import ScraperException
 
 
@@ -31,8 +35,11 @@ class JobConfig:
     bounds: Optional[Tuple[float, float, float, float]] = None
     grid_size: int = 2
     scraping_mode: str = 'fast'  # 'fast' (sequential) or 'coverage' (distributed)
+    review_mode: str = 'all_available'
+    review_window_days: int = 365
     max_reviews: Optional[int] = None
     headless: bool = True
+    output_dir: Optional[str] = None
     config_overrides: Dict[str, Any] = None
     job_type: str = 'scrape'
     owner_csv_path: Optional[str] = None
@@ -146,6 +153,14 @@ class ScraperManager:
     
     def start_job(self, job_config: JobConfig) -> str:
         """Start a new scraping job."""
+        if use_postgres_runner_mode() and job_config.job_type == "scrape":
+            return self._start_orchestrated_scrape_job(job_config)
+        if (
+            os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"}
+            and job_config.job_type == "scrape"
+        ):
+            return self._start_durable_scrape_job(job_config)
+
         job_id = str(uuid.uuid4())
         
         # Create job status
@@ -178,24 +193,159 @@ class ScraperManager:
             self.job_queue.put(job_id)
         
         return job_id
+
+    def _start_durable_scrape_job(self, job_config: JobConfig) -> str:
+        """Create a Postgres campaign and enqueue grid discovery jobs."""
+
+        config_path = parent_dir / "config.yaml"
+        try:
+            scraper_config = Config.from_file(str(config_path))
+        except Exception:
+            scraper_config = Config()
+
+        if job_config.config_overrides:
+            apply_settings_overrides(scraper_config.settings, job_config.config_overrides)
+
+        settings = scraper_config.settings
+        bounds = job_config.bounds or settings.grid.default_bounds
+        review_mode = job_config.review_mode or settings.scraping.review_mode
+        review_window_days = job_config.review_window_days or settings.scraping.review_window_days
+        scraping_mode = job_config.scraping_mode or settings.scraping.default_mode
+        output_dir = Path(job_config.output_dir).expanduser() if job_config.output_dir else Path.cwd()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        store = PostgresStore()
+        store.initialize_schema()
+        campaign_id = store.create_campaign(
+            search_term=job_config.search_term,
+            search_input_term=job_config.search_term,
+            total_target=job_config.total_results,
+            bounds=bounds,
+            grid_size=job_config.grid_size,
+            scraping_mode=scraping_mode,
+            review_mode=review_mode,
+            review_window_days=review_window_days,
+            metadata={
+                "config_path": str(config_path),
+                "output_dir": str(output_dir.resolve()),
+                "headless": job_config.headless,
+                "max_reviews": job_config.max_reviews,
+                "web_job": True,
+                "config_overrides": dict(job_config.config_overrides or {}),
+            },
+        )
+
+        grid = GridNavigator(
+            bounds,
+            job_config.grid_size,
+            settings.grid.default_zoom_level,
+        )
+        store.create_grid_cells(campaign_id, grid.grid_cells)
+        for cell in grid.grid_cells:
+            enqueue_discover_cell(
+                campaign_id,
+                cell.id,
+                config_path=str(config_path),
+            )
+
+        job_status = JobStatus(
+            job_id=campaign_id,
+            status='pending',
+            config=job_config,
+            progress={
+                'current': 0,
+                'total': job_config.total_results,
+                'percentage': 0,
+                'cells_completed': 0,
+                'cells_total': len(grid.grid_cells),
+                'listings_total': 0,
+                'listings_completed': 0,
+            },
+            start_time=datetime.now().isoformat(),
+        )
+
+        with self.lock:
+            self.jobs[campaign_id] = job_status
+
+        return campaign_id
+
+    def _start_orchestrated_scrape_job(self, job_config: JobConfig) -> str:
+        """Queue a Postgres-first scrape job for headed runner execution."""
+
+        config_path = parent_dir / "config.yaml"
+        output_dir = Path(job_config.output_dir).expanduser() if job_config.output_dir else Path.cwd()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        store = OrchestratorStore()
+        store.initialize_schema()
+        initial_progress = {
+            'current': 0,
+            'total': job_config.total_results,
+            'percentage': 0,
+            'cells_completed': 0,
+            'cells_total': 0,
+        }
+        payload = asdict(job_config)
+        payload["config_path"] = str(config_path)
+        payload["output_dir"] = str(output_dir.resolve())
+        job_id = store.queue_job(
+            job_type="scrape",
+            config_payload=payload,
+            progress_payload=initial_progress,
+            output_dir=str(output_dir.resolve()),
+            created_by="web",
+        )
+        job_status = JobStatus(
+            job_id=job_id,
+            status='queued',
+            config=job_config,
+            progress=initial_progress,
+            start_time=datetime.now().isoformat(),
+        )
+        with self.lock:
+            self.jobs[job_id] = job_status
+        return job_id
     
     def cancel_job(self, job_id: str) -> bool:
         """Cancel a pending or running job."""
+        if use_postgres_runner_mode():
+            self._refresh_orchestrated_jobs(limit=200)
         with self.lock:
             if job_id not in self.jobs:
                 return False
             
             job = self.jobs[job_id]
             
-            if job.status == 'pending':
+            if job.status in {'pending', 'queued', 'waiting_for_slot', 'retry_pending', 'backoff'}:
                 job.status = 'cancelled'
                 job.end_time = datetime.now().isoformat()
+                if use_postgres_runner_mode() and job.config.job_type == "scrape":
+                    try:
+                        OrchestratorStore().request_job_cancel(job_id)
+                    except Exception:
+                        pass
+                    return True
+                if os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"}:
+                    try:
+                        PostgresStore().mark_campaign_status(job_id, "cancelled")
+                    except Exception:
+                        pass
                 return True
-            elif job.status == 'running':
+            elif job.status in {'running', 'starting_session'}:
                 if job_id in self.cancel_events:
                     self.cancel_events[job_id].set()
                 job.status = 'cancelled'
                 job.end_time = datetime.now().isoformat()
+                if use_postgres_runner_mode() and job.config.job_type == "scrape":
+                    try:
+                        OrchestratorStore().request_job_cancel(job_id)
+                    except Exception:
+                        pass
+                    return True
+                if os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"}:
+                    try:
+                        PostgresStore().mark_campaign_status(job_id, "cancelled")
+                    except Exception:
+                        pass
                 # Note: We can't easily stop the scraper thread once started
                 # In a production system, we'd need to implement cancellation tokens
                 return True
@@ -205,22 +355,49 @@ class ScraperManager:
     def get_job_status(self, job_id: str) -> Optional[JobStatus]:
         """Get status of a specific job."""
         with self.lock:
-            return self.jobs.get(job_id)
+            job = self.jobs.get(job_id)
+        if job is None and use_postgres_runner_mode():
+            self._refresh_orchestrated_jobs(limit=200)
+            with self.lock:
+                job = self.jobs.get(job_id)
+        if job:
+            self._sync_orchestrated_job_status(job)
+            self._sync_durable_job_status(job)
+        return job
     
     def list_jobs(self, limit: Optional[int] = 50) -> List[JobStatus]:
         """List all jobs, most recent first."""
+        if use_postgres_runner_mode():
+            self._refresh_orchestrated_jobs(limit=limit or 50)
         with self.lock:
             jobs = list(self.jobs.values())
-            # Sort by start time, most recent first
-            jobs.sort(key=lambda j: j.start_time or '0000-00-00', reverse=True)
-            if limit is None or limit <= 0:
-                return jobs
-            return jobs[:limit]
+        for job in jobs:
+            self._sync_orchestrated_job_status(job)
+            self._sync_durable_job_status(job)
+        # Sort by start time, most recent first
+        jobs.sort(key=lambda j: j.start_time or '0000-00-00', reverse=True)
+        if limit is None or limit <= 0:
+            return jobs
+        return jobs[:limit]
     
     def get_active_jobs(self) -> List[JobStatus]:
         """Get currently running jobs."""
+        if use_postgres_runner_mode():
+            self._refresh_orchestrated_jobs(limit=200)
         with self.lock:
-            return [job for job in self.jobs.values() if job.status == 'running']
+            return [
+                job
+                for job in self.jobs.values()
+                if job.status in {
+                    'pending',
+                    'queued',
+                    'waiting_for_slot',
+                    'starting_session',
+                    'running',
+                    'backoff',
+                    'retry_pending',
+                }
+            ]
     
     def get_completed_jobs(self) -> List[JobStatus]:
         """Get completed jobs."""
@@ -253,12 +430,285 @@ class ScraperManager:
         job = self.get_job_status(job_id)
         if not job or job.status != 'completed':
             return {}
+
+        if use_postgres_runner_mode() and job.config.job_type == "scrape":
+            return self._get_orchestrated_job_results(job.job_id)
+
+        self._ensure_durable_exports(job)
         
         return {
             'business_data': job.results_file,
             'reviews_data': job.reviews_file,
             'log_file': job.log_file
         }
+
+    def _refresh_orchestrated_jobs(self, limit: int = 50) -> None:
+        try:
+            store = OrchestratorStore()
+            jobs = store.list_jobs(limit=limit)
+        except Exception:
+            return
+
+        with self.lock:
+            for db_job in jobs:
+                existing = self.jobs.get(db_job.job_id)
+                payload = self._job_config_from_payload(db_job.config_payload)
+                if existing is None:
+                    self.jobs[db_job.job_id] = JobStatus(
+                        job_id=db_job.job_id,
+                        status=db_job.status,
+                        config=payload,
+                        progress=dict(db_job.progress_payload or {}),
+                        start_time=db_job.started_at.isoformat() if db_job.started_at else db_job.created_at.isoformat(),
+                        end_time=db_job.completed_at.isoformat() if db_job.completed_at else None,
+                        error_message=db_job.last_error_message,
+                    )
+                else:
+                    existing.status = db_job.status
+                    existing.progress.update(db_job.progress_payload or {})
+                    existing.error_message = db_job.last_error_message
+                    if db_job.started_at:
+                        existing.start_time = db_job.started_at.isoformat()
+                    if db_job.completed_at:
+                        existing.end_time = db_job.completed_at.isoformat()
+
+    def _sync_orchestrated_job_status(self, job: JobStatus) -> None:
+        if not use_postgres_runner_mode():
+            return
+        if job.config.job_type != "scrape":
+            return
+        store = OrchestratorStore()
+        try:
+            db_job = store.get_job(job.job_id)
+        except Exception:
+            return
+
+        artifacts = store.get_job_artifacts(job.job_id)
+        checkpoint = store.get_job_checkpoint(job.job_id)
+        session = store.get_current_browser_session(job.job_id)
+        runner = store.get_runner_node(session.runner_id) if session else None
+        available_actions = self._get_orchestrated_job_actions(
+            db_job.status,
+            has_checkpoint=checkpoint is not None,
+        )
+        with self.lock:
+            job.status = db_job.status
+            job.progress.update(db_job.progress_payload or {})
+            job.error_message = db_job.last_error_message
+            job.results_file = artifacts.get("business_data")
+            job.reviews_file = artifacts.get("reviews_data")
+            job.log_file = artifacts.get("log_file")
+            job.available_actions = available_actions
+            job.orchestration = {
+                "backend": "postgres_runner",
+                "current_run_id": db_job.current_run_id,
+                "failure_category": db_job.failure_category,
+                "failure_reason": db_job.failure_reason,
+                "recommended_action": db_job.recommended_action,
+                "cancel_requested": db_job.cancel_requested,
+                "has_checkpoint": checkpoint is not None,
+                "session": {
+                    "session_id": session.session_id,
+                    "runner_id": session.runner_id,
+                    "status": session.status,
+                    "display_name": session.display_name,
+                    "novnc_url": session.novnc_url,
+                    "last_heartbeat_at": (
+                        session.last_heartbeat_at.isoformat()
+                        if session.last_heartbeat_at
+                        else None
+                    ),
+                } if session else None,
+                "runner": runner,
+            }
+            job.start_time = (
+                db_job.started_at.isoformat()
+                if db_job.started_at
+                else db_job.created_at.isoformat()
+            )
+            if db_job.completed_at:
+                job.end_time = db_job.completed_at.isoformat()
+
+    def _get_orchestrated_job_results(self, job_id: str) -> Dict[str, Optional[str]]:
+        artifacts = OrchestratorStore().get_job_artifacts(job_id)
+        return {
+            "business_data": artifacts.get("business_data"),
+            "reviews_data": artifacts.get("reviews_data"),
+            "log_file": artifacts.get("log_file"),
+        }
+
+    def get_job_operations(self, job_id: str) -> Optional[Dict[str, Any]]:
+        job = self.get_job_status(job_id)
+        if not job:
+            return None
+        if not (use_postgres_runner_mode() and job.config.job_type == "scrape"):
+            return {
+                "backend": "legacy",
+                "available_actions": ["cancel"] if job.status in {"pending", "running"} else [],
+                "events": [],
+                "artifacts": [],
+                "checkpoint": None,
+                "session": None,
+                "runner": None,
+                "migration": {
+                    "current_mode": "legacy",
+                    "recommended_mode": "postgres_runner",
+                },
+            }
+
+        store = OrchestratorStore()
+        try:
+            db_job = store.get_job(job_id)
+        except Exception:
+            return None
+        checkpoint = store.get_job_checkpoint(job_id)
+        session = store.get_current_browser_session(job_id)
+        runner = store.get_runner_node(session.runner_id) if session else None
+        return {
+            "backend": "postgres_runner",
+            "available_actions": self._get_orchestrated_job_actions(
+                db_job.status,
+                has_checkpoint=checkpoint is not None,
+            ),
+            "failure_category": db_job.failure_category,
+            "failure_reason": db_job.failure_reason,
+            "recommended_action": db_job.recommended_action,
+            "current_run_id": db_job.current_run_id,
+            "checkpoint": checkpoint,
+            "session": {
+                "session_id": session.session_id,
+                "runner_id": session.runner_id,
+                "status": session.status,
+                "display_name": session.display_name,
+                "novnc_url": session.novnc_url,
+                "state_dir": session.state_dir,
+                "artifact_dir": session.artifact_dir,
+                "leased_at": session.leased_at.isoformat() if session.leased_at else None,
+                "released_at": session.released_at.isoformat() if session.released_at else None,
+                "last_heartbeat_at": (
+                    session.last_heartbeat_at.isoformat()
+                    if session.last_heartbeat_at
+                    else None
+                ),
+            } if session else None,
+            "runner": runner,
+            "events": store.list_job_events(job_id, limit=30),
+            "artifacts": store.list_job_artifacts(job_id, limit=30),
+            "migration": {
+                "current_mode": "postgres_runner",
+                "legacy_mode_available": os.getenv("SCRAPER_USE_RQ", "").lower() in {"1", "true", "yes"},
+            },
+        }
+
+    def execute_job_action(self, job_id: str, action: str) -> Dict[str, Any]:
+        job = self.get_job_status(job_id)
+        if not job:
+            raise ValueError("Job not found")
+
+        if action == "cancel":
+            if not self.cancel_job(job_id):
+                raise ValueError("Job not found or cannot be cancelled")
+            return {"job_id": job_id, "status": "cancelled", "action": action}
+
+        if not (use_postgres_runner_mode() and job.config.job_type == "scrape"):
+            raise ValueError(f"Action '{action}' is only available in postgres-runner mode")
+
+        store = OrchestratorStore()
+        operations = self.get_job_operations(job_id) or {}
+        available_actions = set(operations.get("available_actions") or [])
+        if action not in available_actions:
+            raise ValueError(f"Action '{action}' is not available for this job")
+
+        if action in {"retry", "restart_from_checkpoint"}:
+            store.requeue_job(job_id, reset_progress=False, clear_checkpoint=False)
+        elif action == "restart_from_scratch":
+            store.requeue_job(job_id, reset_progress=True, clear_checkpoint=True)
+        else:
+            raise ValueError(f"Unsupported action '{action}'")
+
+        self._refresh_orchestrated_jobs(limit=200)
+        job = self.get_job_status(job_id)
+        return {
+            "job_id": job_id,
+            "status": job.status if job else "queued",
+            "action": action,
+        }
+
+    @staticmethod
+    def _get_orchestrated_job_actions(status: str, *, has_checkpoint: bool) -> List[str]:
+        if status in {"pending", "queued", "waiting_for_slot", "starting_session", "running", "backoff", "retry_pending"}:
+            return ["cancel"]
+        if status in {"failed", "cancelled"}:
+            actions = ["retry", "restart_from_scratch"]
+            if has_checkpoint:
+                actions.insert(1, "restart_from_checkpoint")
+            return actions
+        if status == "completed":
+            return ["restart_from_scratch"]
+        return []
+
+    @staticmethod
+    def _job_config_from_payload(payload: Dict[str, Any]) -> JobConfig:
+        fields = JobConfig.__dataclass_fields__
+        filtered = {key: value for key, value in (payload or {}).items() if key in fields}
+        return JobConfig(**filtered)
+
+    def _sync_durable_job_status(self, job: JobStatus) -> None:
+        if os.getenv("SCRAPER_USE_RQ", "").lower() not in {"1", "true", "yes"}:
+            return
+        if job.config.job_type != "scrape":
+            return
+        if job.job_id in self.active_threads:
+            return
+
+        try:
+            store = PostgresStore()
+            campaign = store.get_campaign(job.job_id)
+            progress = store.get_campaign_progress(job.job_id)
+        except Exception:
+            return
+
+        status = campaign.status
+        if status == "completed_with_errors":
+            status = "completed"
+
+        with self.lock:
+            job.status = status
+            job.progress.update({
+                'current': progress.get('listings_completed', 0),
+                'total': progress.get('listings_total') or job.config.total_results,
+                'percentage': progress.get('percentage', 0),
+                'cells_completed': progress.get('cells_completed', 0),
+                'cells_total': progress.get('cells_total', 0),
+                'cells_failed': progress.get('cells_failed', 0),
+                'listings_total': progress.get('listings_total', 0),
+                'listings_completed': progress.get('listings_completed', 0),
+                'listings_failed': progress.get('listings_failed', 0),
+            })
+            if job.status in {'completed', 'failed', 'cancelled'} and not job.end_time:
+                job.end_time = datetime.now().isoformat()
+
+    def _ensure_durable_exports(self, job: JobStatus) -> None:
+        if os.getenv("SCRAPER_USE_RQ", "").lower() not in {"1", "true", "yes"}:
+            return
+        if job.results_file and job.reviews_file:
+            return
+        if job.config.job_type != "scrape":
+            return
+
+        output_dir = Path(job.config.output_dir).expanduser() if job.config.output_dir else Path.cwd()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results_file = output_dir / f"result_{job.job_id}.csv"
+        reviews_file = output_dir / f"reviews_{job.job_id}.csv"
+        store = PostgresStore()
+        business_csv, reviews_csv = store.export_campaign_csvs(
+            job.job_id,
+            business_csv=results_file,
+            reviews_csv=reviews_file,
+        )
+        with self.lock:
+            job.results_file = business_csv
+            job.reviews_file = reviews_csv
     
     def _process_jobs(self):
         """Background thread that processes jobs from the queue."""
@@ -308,12 +758,15 @@ class ScraperManager:
                 self._run_owner_enrichment_job(job_id, config)
                 return
 
+            output_dir = Path(config.output_dir).expanduser() if config.output_dir else Path.cwd()
+            output_dir.mkdir(parents=True, exist_ok=True)
+
             # Create unique filenames for this job
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            results_file = f"result_{job_id}_{timestamp}.csv"
-            reviews_file = f"reviews_{job_id}_{timestamp}.csv"
-            progress_file = f"progress_{job_id}_{timestamp}.json"
-            log_file = f"scraper_log_{job_id}_{timestamp}.log"
+            results_file = output_dir / f"result_{job_id}_{timestamp}.csv"
+            reviews_file = output_dir / f"reviews_{job_id}_{timestamp}.csv"
+            progress_file = output_dir / f"progress_{job_id}_{timestamp}.json"
+            log_file = output_dir / f"scraper_log_{job_id}_{timestamp}.log"
             
             # Create scraper configuration based on shared YAML
             config_path = parent_dir / "config.yaml"
@@ -324,16 +777,7 @@ class ScraperManager:
             
             # Apply overrides
             if config.config_overrides:
-                for key, value in config.config_overrides.items():
-                    if key == 'owner_enrichment' and isinstance(value, dict):
-                        owner_settings = scraper_config.settings.owner_enrichment
-                        for sub_key, sub_value in value.items():
-                            if hasattr(owner_settings, sub_key):
-                                setattr(owner_settings, sub_key, sub_value)
-                        continue
-
-                    if hasattr(scraper_config.settings, key):
-                        setattr(scraper_config.settings, key, value)
+                apply_settings_overrides(scraper_config.settings, config.config_overrides)
             
             # Set headless mode
             scraper_config.settings.browser.headless = config.headless
@@ -341,6 +785,8 @@ class ScraperManager:
             # Set max reviews if specified
             if config.max_reviews:
                 scraper_config.settings.scraping.max_reviews_per_business = config.max_reviews
+            scraper_config.settings.scraping.review_mode = config.review_mode
+            scraper_config.settings.scraping.review_window_days = config.review_window_days
             
             # Set custom filenames
             scraper_config.settings.files.result_filename = results_file
@@ -404,9 +850,9 @@ class ScraperManager:
                 job = self.jobs[job_id]
                 job.status = 'completed'
                 job.end_time = datetime.now().isoformat()
-                job.results_file = str(Path(results_file).expanduser().resolve())
-                job.reviews_file = str(Path(reviews_file).expanduser().resolve())
-                job.log_file = str(Path(log_file).expanduser().resolve())
+                job.results_file = str(results_file.resolve())
+                job.reviews_file = str(reviews_file.resolve())
+                job.log_file = str(log_file.resolve())
                 
                 # Final progress update
                 job.progress['percentage'] = 100
@@ -456,16 +902,7 @@ class ScraperManager:
         except Exception:
             enrichment_config = Config()
         if job_config.config_overrides:
-            for key, value in job_config.config_overrides.items():
-                if key == 'owner_enrichment' and isinstance(value, dict):
-                    owner_settings = enrichment_config.settings.owner_enrichment
-                    for sub_key, sub_value in value.items():
-                        if hasattr(owner_settings, sub_key):
-                            setattr(owner_settings, sub_key, sub_value)
-                    continue
-
-                if hasattr(enrichment_config.settings, key):
-                    setattr(enrichment_config.settings, key, value)
+            apply_settings_overrides(enrichment_config.settings, job_config.config_overrides)
 
         total_rows = max(self._count_rows(csv_path), 0)
         self.update_job_progress(job_id, {

@@ -8,6 +8,7 @@ from pathlib import Path
 import logging
 
 from ..utils.exceptions import PersistenceException
+from ..utils.helpers import extract_place_id
 
 
 @dataclass
@@ -22,6 +23,7 @@ class JobProgress:
     grid_size: int
     total_target: int
     scraping_mode: str = 'fast'  # Track the scraping mode used
+    review_mode: str = 'all_available'
     cell_results: Optional[dict] = None  # Track results per cell {cell_id: count}
     start_time: Optional[str] = None
     last_updated: Optional[str] = None
@@ -41,12 +43,13 @@ class JobProgress:
     
     def get_seen_urls_set(self) -> Set[str]:
         """Get seen URLs as a set for efficient lookup."""
-        return set(self.seen_urls)
+        return {extract_place_id(url) for url in self.seen_urls if extract_place_id(url)}
     
     def add_seen_url(self, url: str) -> None:
         """Add a URL to the seen list."""
-        if url not in self.seen_urls:
-            self.seen_urls.append(url)
+        normalized = extract_place_id(url)
+        if normalized and normalized not in self.seen_urls:
+            self.seen_urls.append(normalized)
     
     def add_seen_urls(self, urls: List[str]) -> None:
         """Add multiple URLs to the seen list."""
@@ -68,12 +71,13 @@ class JobProgress:
             return 0.0
         return min(100.0, (self.results_count / self.total_target) * 100)
     
-    def is_same_job(self, search_term: str, bounds: Tuple[float, float, float, float], 
-                    grid_size: int) -> bool:
+    def is_same_job(self, search_term: str, bounds: Tuple[float, float, float, float],
+                    grid_size: int, review_mode: str = 'all_available') -> bool:
         """Check if this progress matches the given job parameters."""
         return (self.search_term == search_term and 
                 self.bounds == list(bounds) and 
-                self.grid_size == grid_size)
+                self.grid_size == grid_size and
+                self.review_mode == review_mode)
     
     def add_cell_results(self, cell_id: str, count: int) -> None:
         """Track results collected from specific cell."""
@@ -140,6 +144,7 @@ class ProgressTracker:
                     grid_size=data.get("grid_size", 0),
                     total_target=data.get("total_target", 0),
                     scraping_mode=data.get("scraping_mode", "fast"),
+                    review_mode=data.get("review_mode", "all_available"),
                     cell_results=data.get("cell_results", {}),
                     start_time=data.get("start_time"),
                     last_updated=data.get("last_updated")
@@ -192,7 +197,8 @@ class ProgressTracker:
             raise PersistenceException(f"Failed to save progress to {self.filename}: {e}") from e
     
     def initialize_job(self, search_term: str, bounds: Tuple[float, float, float, float],
-                      grid_size: int, total_target: int, scraping_mode: str = 'fast') -> JobProgress:
+                      grid_size: int, total_target: int, scraping_mode: str = 'fast',
+                      review_mode: str = 'all_available') -> JobProgress:
         """Initialize progress for a new job or continue existing one.
         
         Args:
@@ -207,10 +213,11 @@ class ProgressTracker:
         existing_progress = self.load_progress()
         
         # Check if this is the same job
-        if existing_progress.is_same_job(search_term, bounds, grid_size):
+        if existing_progress.is_same_job(search_term, bounds, grid_size, review_mode):
             self.logger.info("Continuing existing job")
             # Update target if it changed
             existing_progress.total_target = total_target
+            existing_progress.review_mode = review_mode
             self._current_progress = existing_progress
             return existing_progress
         
@@ -225,6 +232,7 @@ class ProgressTracker:
             grid_size=grid_size,
             total_target=total_target,
             scraping_mode=scraping_mode,
+            review_mode=review_mode,
             cell_results={}
         )
         

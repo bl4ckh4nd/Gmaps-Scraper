@@ -25,7 +25,10 @@ class Selectors:
     # Review selectors
     REVIEWS_COUNT: str = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span//span//span[@aria-label]'
     REVIEWS_AVERAGE: List[str] = None
-    RATING_SELECTOR: str = '//span[@role="img" and contains(@class, "ceNzKf") and contains(@aria-label, "Sterne")]'
+    RATING_SELECTOR: str = '//div[contains(@class, "LBgpqf")]//span[@role="img" and contains(@aria-label, "Sterne")]'
+    DELETED_REVIEWS_SELECTORS: List[str] = None
+    REVIEW_SUMMARY_ARIA_SELECTORS: List[str] = None
+    REVIEW_SUMMARY_TEXT_SELECTORS: List[str] = None
     
     # Operating hours selectors  
     OPENS_AT: str = '//button[contains(@data-item-id, "oh")]//div[contains(@class, "fontBodyMedium")]'
@@ -46,6 +49,9 @@ class Selectors:
     REVIEW_STARS_SELECTORS: List[str] = None
     REVIEW_DATE_SELECTORS: List[str] = None
     OWNER_RESPONSE_SELECTORS: List[str] = None
+    REVIEW_SORT_BUTTON_SELECTORS: List[str] = None
+    REVIEW_SORT_NEWEST_SELECTORS: List[str] = None
+    REVIEW_FULL_LIST_OPENERS: List[str] = None
     
     # Scrollable feed selectors for reviews
     REVIEW_FEED_SELECTORS: List[str] = None
@@ -62,14 +68,42 @@ class Selectors:
             '//div[@class="F7nice"]//span[1]/span[1]',
             '//div[@class="fontBodyMedium dmRWX"]//span[@aria-hidden and contains(text(), ",")]'
         ]
+
+        self.DELETED_REVIEWS_SELECTORS = [
+            'div.TIHn2',
+            'div.LBgpqf',
+            'div.fontBodyMedium.dmRWX',
+            'div.tos0Ie',
+            'div[role="dialog"] .EFUAFd',
+            'div[role="dialog"]',
+        ]
+
+        self.REVIEW_SUMMARY_ARIA_SELECTORS = [
+            'xpath=//div[contains(@class, "LBgpqf")]//*[@role="img" and contains(@aria-label, "Rezensionen")]',
+            'xpath=//div[contains(@class, "LBgpqf")]//*[@role="img" and contains(@aria-label, "Reviews")]',
+            'xpath=//div[contains(@class, "LBgpqf")]//*[@role="img" and contains(@aria-label, "Sterne")]',
+            'xpath=//div[contains(@class, "LBgpqf")]//*[@role="img" and contains(@aria-label, "stars")]',
+            'xpath=//img[contains(@aria-label, "Rezensionen")]',
+            'xpath=//img[contains(@aria-label, "Reviews")]',
+            'xpath=//img[contains(@aria-label, "Sterne")]',
+            'xpath=//img[contains(@aria-label, "stars")]',
+        ]
+
+        self.REVIEW_SUMMARY_TEXT_SELECTORS = [
+            'xpath=//div[contains(@class, "TIHn2 ")]//div[contains(@class, "fontBodyMedium dmRWX")]',
+            'xpath=//div[contains(@class, "LBgpqf")]',
+            'xpath=//div[contains(@class, "F7nice")]',
+        ]
         
         self.REVIEWS_TAB_SELECTORS = [
             'xpath=//button[@role="tab" and contains(@aria-label, "Rezensionen")]',
             'xpath=//button[@role="tab" and contains(@aria-label, "Reviews")]',
             'xpath=//button[@role="tab"]//div[contains(text(), "Rezensionen")]/..',
             'xpath=//button[@role="tab"]//div[contains(text(), "Reviews")]/..',
-            'xpath=//button[@role="tab" and @data-tab-index="1"]',
-            'xpath=//button[@jsaction="pane.rating.moreReviews"]'
+            'xpath=//button[contains(@aria-label, "Rezensionen")]',
+            'xpath=//button[contains(@aria-label, "Reviews")]',
+            'xpath=//button[contains(@jsaction, "pane.rating.moreReviews")]',
+            'xpath=//*[@jsaction="pane.rating.moreReviews"]',
         ]
         
         self.REVIEWER_NAME_SELECTORS = [
@@ -86,6 +120,8 @@ class Selectors:
         
         self.REVIEW_STARS_SELECTORS = [
             'xpath=.//span[@class="kvMYJc"]',
+            'xpath=.//*[@role="img" and contains(@aria-label, "Stern")]',
+            'xpath=.//*[@role="img" and contains(@aria-label, "star")]',
             'css=span.kvMYJc',
             '.kvMYJc'
         ]
@@ -100,6 +136,28 @@ class Selectors:
             'xpath=.//div[@class="CDe7pd"]//div[@class="wiI7pd"]',
             'css=div.CDe7pd div.wiI7pd',
             'div.CDe7pd .wiI7pd'
+        ]
+
+        self.REVIEW_SORT_BUTTON_SELECTORS = [
+            'button[aria-label*="sortieren" i]',
+            'button[aria-label*="sort" i]',
+            'button:has-text("Sortieren")',
+            'button:has-text("Sort")',
+            'button:has-text("Relevanteste")',
+            'button:has-text("Most relevant")',
+        ]
+
+        self.REVIEW_SORT_NEWEST_SELECTORS = [
+            '[role="menuitemradio"]:has-text("Neueste")',
+            '[role="menuitemradio"]:has-text("Newest")',
+            '[role="menuitemradio"]:has-text("Most recent")',
+        ]
+
+        self.REVIEW_FULL_LIST_OPENERS = [
+            'button[jsaction*="reviewChart.moreReviews"]',
+            '[jsaction*="pane.reviewChart.moreReviews"]',
+            'button:has-text("Alle Rezensionen")',
+            'button:has-text("All reviews")',
         ]
         
         self.REVIEW_FEED_SELECTORS = [

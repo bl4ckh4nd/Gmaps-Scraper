@@ -1,8 +1,8 @@
 """Utility functions for Google Maps scraper."""
 
+import logging
 import re
 from typing import Optional
-import logging
 
 
 def extract_place_id(url: str) -> str:
@@ -18,7 +18,7 @@ def extract_place_id(url: str) -> str:
         # Look for the !19s pattern which is followed by the place ID
         if '!19s' in url:
             # Extract everything after !19s
-            place_id = url.split('!19s')[1].split('!')[0]
+            place_id = url.split('!19s', 1)[1].split('!', 1)[0].split('?', 1)[0]
             return place_id
         
         # Alternative method - look for the data= pattern
@@ -27,7 +27,7 @@ def extract_place_id(url: str) -> str:
             # Find the part with business ID
             for part in parts:
                 if ':0x' in part:
-                    return part
+                    return part.split('?', 1)[0]
         
         # If neither method works, use the full URL (less efficient)
         return url
@@ -48,9 +48,9 @@ def parse_star_rating(star_text: Optional[str]) -> int:
         return 0
     
     # Extract the number from text like "5 Sterne" or "1 Stern"
-    match = re.search(r'(\d+)', star_text)
+    match = re.search(r'(\d+(?:[.,]\d+)?)', star_text)
     if match:
-        rating = int(match.group(1))
+        rating = int(float(match.group(1).replace(',', '.')))
         # Ensure rating is in valid range
         return max(0, min(5, rating))
     return 0
@@ -134,17 +134,24 @@ def parse_review_count(review_text: str) -> int:
     if not review_text:
         return 0
     
-    # Remove parentheses and commas
-    clean_text = review_text.replace('(', '').replace(')', '').replace(',', '').strip()
-    
-    # Extract first number found
-    match = re.search(r'(\d+)', clean_text)
-    if match:
-        try:
-            return int(match.group(1))
-        except ValueError:
-            return 0
-    
+    normalized = review_text.replace("\xa0", " ").strip()
+
+    review_match = re.search(
+        r'(\d[\d.,\s]*)\s*(?:bewertungen|rezensionen|reviews?)\b',
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if review_match:
+        return _parse_localized_int(review_match.group(1))
+
+    paren_match = re.search(r'\((\d[\d.,\s]*)\)', normalized)
+    if paren_match:
+        return _parse_localized_int(paren_match.group(1))
+
+    exact_number = re.fullmatch(r'\d[\d.,\s]*', normalized)
+    if exact_number:
+        return _parse_localized_int(exact_number.group(0))
+
     return 0
 
 
@@ -191,6 +198,43 @@ def clean_text(text: str) -> str:
     return cleaned
 
 
+def extract_review_date_text(text: str) -> str:
+    """Extract a Google review date phrase from a larger text block."""
+
+    if not text:
+        return ""
+
+    patterns = [
+        r"\b(?:heute|today|gestern|yesterday)\b",
+        r"\bvor (?:einer|einem|\d+) (?:stunde|stunden|minute|minuten)\b",
+        r"\bvor (?:einem|einer|\d+) (?:tag|tagen|woche|wochen|monat|monaten|jahr|jahren)\b",
+        r"\b(?:an?\s+edited|edited|bearbeitet:)\s*(?:vor (?:einer|einem|\d+) (?:stunde|stunden|minute|minuten|tag|tagen|woche|wochen|monat|monaten|jahr|jahren))\b",
+        r"\b(?:an?\s+edited|edited|bearbeitet:)\s*(?:a|an|one|\d+) (?:hour|hours|minute|minutes|day|days|week|weeks|month|months|year|years) ago\b",
+        r"\b(?:a|an|one|\d+) (?:hour|hours|minute|minutes) ago\b",
+        r"\b(?:a|an|one|\d+) (?:day|days|week|weeks|month|months|year|years) ago\b",
+        r"\b\d{1,2}[./]\d{1,2}[./]\d{2,4}\b",
+        r"\b\d{4}-\d{2}-\d{2}\b",
+    ]
+
+    candidates = list(text.splitlines())
+    normalized = clean_text(text.replace("\xa0", " "))
+    if normalized:
+        candidates.append(normalized)
+
+    for candidate in candidates:
+        cleaned_candidate = clean_text(candidate)
+        if not cleaned_candidate:
+            continue
+
+        for pattern in patterns:
+            match = re.search(pattern, cleaned_candidate, flags=re.IGNORECASE)
+            if match:
+                extracted = match.group(0).strip()
+                return re.sub(r"^(?:bearbeitet:|edited)\s*", "", extracted, flags=re.IGNORECASE).strip()
+
+    return ""
+
+
 def is_valid_email(email: str) -> bool:
     """Check if email address is valid.
     
@@ -227,3 +271,14 @@ def setup_retry_logger(name: str) -> logging.Logger:
         logger.setLevel(logging.INFO)
     
     return logger
+
+
+def _parse_localized_int(value: str) -> int:
+    normalized = re.sub(r"[^\d]", "", value or "")
+    if not normalized:
+        return 0
+
+    try:
+        return int(normalized)
+    except ValueError:
+        return 0

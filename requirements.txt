@@ -9,6 +9,9 @@ PyYAML>=6.0
 # Data handling
 openpyxl>=3.1.1
 python-dateutil>=2.8.2
+psycopg[binary]>=3.1.18
+redis>=5.0.0
+rq>=1.16.0
 
 # Supporting libraries
 et-xmlfile>=1.1.0

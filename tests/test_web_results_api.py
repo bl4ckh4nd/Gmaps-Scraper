@@ -10,6 +10,7 @@ if str(WEB_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_DIR))
 
 import app as web_app
+import scraper_service
 from scraper_service import JobConfig, JobStatus
 
 
@@ -122,3 +123,110 @@ def test_list_jobs_supports_server_side_filter_and_pagination(monkeypatch):
     assert len(payload["jobs"]) == 1
     assert payload["jobs"][0]["status"] == "failed"
 
+
+def test_validate_job_config_accepts_extraction_overrides():
+    job_config, error = web_app.validate_job_config({
+        "search_term": "coffee",
+        "total_results": 25,
+        "config_overrides": {
+            "extraction": {
+                "contact_fields": True,
+                "review_rows": False,
+                "website_modernity": True,
+            }
+        },
+    })
+
+    assert error is None
+    assert job_config is not None
+    assert job_config.config_overrides["extraction"]["website_modernity"] is True
+
+
+def test_validate_job_config_rejects_non_boolean_extraction_override():
+    job_config, error = web_app.validate_job_config({
+        "search_term": "coffee",
+        "total_results": 25,
+        "config_overrides": {
+            "extraction": {
+                "review_rows": "yes",
+            }
+        },
+    })
+
+    assert job_config is None
+    assert error == "extraction.review_rows must be a boolean"
+
+
+def test_scraper_manager_uses_postgres_runner_mode(monkeypatch):
+    monkeypatch.setenv("SCRAPER_USE_POSTGRES_RUNNER", "1")
+    manager = scraper_service.ScraperManager()
+    called = {}
+
+    def _start(config):
+        called["config"] = config
+        return "job-postgres"
+
+    monkeypatch.setattr(manager, "_start_orchestrated_scrape_job", _start)
+
+    job_id = manager.start_job(JobConfig(search_term="coffee", total_results=25, job_type="scrape"))
+
+    assert job_id == "job-postgres"
+    assert called["config"].search_term == "coffee"
+
+
+def test_operations_endpoint_returns_manager_payload(monkeypatch):
+    job = _make_job("job-ops", "failed")
+    job.available_actions = ["retry", "restart_from_scratch"]
+    monkeypatch.setattr(web_app.scraper_manager, "get_job_status", lambda job_id: job)
+    monkeypatch.setattr(
+        web_app.scraper_manager,
+        "get_job_operations",
+        lambda job_id: {
+            "backend": "postgres_runner",
+            "available_actions": ["retry", "restart_from_scratch"],
+            "events": [{"event_type": "job_failed", "message": "boom"}],
+            "artifacts": [],
+            "checkpoint": {"payload": {"results_count": 10}},
+            "session": {"runner_id": "runner-1", "status": "failed"},
+            "runner": {"runner_id": "runner-1"},
+        },
+    )
+
+    client = web_app.app.test_client()
+    response = client.get("/api/jobs/job-ops/operations")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["backend"] == "postgres_runner"
+    assert payload["available_actions"] == ["retry", "restart_from_scratch"]
+    assert payload["session"]["runner_id"] == "runner-1"
+
+
+def test_job_action_endpoint_executes_manager_action(monkeypatch):
+    monkeypatch.setattr(
+        web_app.scraper_manager,
+        "execute_job_action",
+        lambda job_id, action: {"job_id": job_id, "status": "queued", "action": action},
+    )
+
+    client = web_app.app.test_client()
+    response = client.post("/api/jobs/job-ops/actions", json={"action": "retry"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["job_id"] == "job-ops"
+    assert payload["action"] == "retry"
+
+
+def test_list_jobs_supports_orchestrator_status_filter(monkeypatch):
+    waiting_job = _make_job("job-waiting", "waiting_for_slot", "coffee")
+    failed_job = _make_job("job-failed", "failed", "bakery")
+    monkeypatch.setattr(web_app.scraper_manager, "list_jobs", lambda limit=None: [waiting_job, failed_job])
+
+    client = web_app.app.test_client()
+    response = client.get("/api/jobs?status=waiting_for_slot")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["total"] == 1
+    assert payload["jobs"][0]["status"] == "waiting_for_slot"

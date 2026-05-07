@@ -1,6 +1,6 @@
 """Page navigation and interaction for Google Maps scraper."""
 
-from typing import List, Optional, Set
+from typing import Callable, List, Optional, Set
 from playwright.sync_api import Page
 import time
 import os
@@ -18,19 +18,27 @@ from ..utils.logger import get_component_logger
 class PageNavigator:
     """Handles page navigation and interaction with Google Maps."""
     
-    def __init__(self, page: Page, settings: ScraperSettings, selectors: Selectors):
+    def __init__(
+        self,
+        page: Page,
+        settings: ScraperSettings,
+        selectors: Selectors,
+        persist_session_state_callback: Optional[Callable[[], None]] = None,
+    ):
         """Initialize page navigator.
         
         Args:
             page: Playwright page instance
             settings: Scraper configuration
             selectors: Selector configuration
+            persist_session_state_callback: Optional callback used after consent changes
         """
         self.page = page
         self.settings = settings
         self.selectors = selectors
         self.logger = get_component_logger('PageNavigator')
         self._cookie_banner_handled = False
+        self._persist_session_state_callback = persist_session_state_callback
         
         # Create debug directories
         self.debug_dir = Path('debug')
@@ -68,10 +76,12 @@ class PageNavigator:
                     
                     if self.handle_cookie_banner(self.settings.browser.cookie_preference):
                         self._cookie_banner_handled = True
+                        self._persist_session_state()
                         self.save_debug_screenshot("03_after_cookie_handling", grid_cell.id)
                         self.logger.info("Cookie banner handled successfully")
                     else:
                         self.logger.info("No cookie banner found")
+                        self._cookie_banner_handled = True
                         
                 except Exception as e:
                     self.logger.warning(f"Cookie banner handling failed: {e}")
@@ -109,23 +119,18 @@ class PageNavigator:
             # Log available input elements for debugging
             self.log_available_elements("inputs")
             
-            # Try multiple search input selectors
-            search_input = None
-            for selector in self.selectors.SEARCH_INPUT_SELECTORS:
-                try:
-                    locator = self.page.locator(selector)
-                    if locator.count() > 0:
-                        # Check if element is visible and enabled
-                        first_elem = locator.first
-                        if first_elem.is_visible() and first_elem.is_enabled():
-                            search_input = first_elem
-                            self.logger.info(f"Found search input with selector: {selector}")
-                            break
-                        else:
-                            self.logger.debug(f"Search input found but not visible/enabled: {selector}")
-                except Exception as e:
-                    self.logger.debug(f"Failed to locate search input with selector '{selector}': {e}")
-                    continue
+            search_input = self._find_search_input()
+            if search_input is None and self.settings.browser.handle_cookie_banner:
+                consent_is_blocking = self.is_on_consent_page() or self._has_visible_cookie_buttons()
+                if consent_is_blocking:
+                    self.logger.info(
+                        "Cookie consent appears to be blocking the search input; attempting one recovery pass."
+                    )
+                    if self.handle_cookie_banner(self.settings.browser.cookie_preference):
+                        self._cookie_banner_handled = True
+                        self._persist_session_state()
+                        self.page.wait_for_timeout(1000)
+                        search_input = self._find_search_input()
             
             if search_input is None:
                 # Save debug information when search input is not found
@@ -258,59 +263,93 @@ class PageNavigator:
             self.logger.debug(f"Mouse wheel scrolling failed: {e}")
             return False
     
-    def collect_listing_urls(self, seen_urls: Optional[Set[str]] = None) -> List[str]:
+    def collect_listing_urls(
+        self,
+        seen_urls: Optional[Set[str]] = None,
+        target_count: Optional[int] = None,
+    ) -> List[str]:
         """Collect all listing URLs from the current search results.
         
         Args:
             seen_urls: Set of already seen URLs to filter out
-            
+            target_count: Optional number of unseen listing URLs to collect
+
         Returns:
             List of unique listing URLs
         """
-        seen_urls = seen_urls or set()
-        unique_urls = []
+        seen_urls = set(seen_urls or set())
+        unique_urls: List[str] = []
+        stagnant_attempts = 0
+        max_attempts = self.settings.scraping.max_scroll_attempts
+        scroll_interval = self.settings.scraping.scroll_interval
         
         try:
             # Wait for listings to be available
             self.page.wait_for_selector(self.selectors.SEARCH_RESULTS, timeout=5000)
-            
-            # Get all listing elements
-            all_listings = self.page.locator(self.selectors.SEARCH_RESULTS).all()
-            self.logger.info(f"Found {len(all_listings)} total listing elements")
-            
-            # Extract URLs from visible and accessible listings
-            for idx, listing in enumerate(all_listings):
-                try:
-                    # Check if listing is visible
-                    if not listing.is_visible():
-                        continue
-                    
-                    # Get the href attribute
-                    url = listing.get_attribute('href', timeout=3000)
-                    if not url:
-                        continue
-                    
-                    # Extract place ID for deduplication
-                    place_id = extract_place_id(url)
-                    
-                    # Only add if not already seen
-                    if place_id not in seen_urls:
-                        unique_urls.append(url)
-                        seen_urls.add(place_id)
-                        
-                        if idx < 10 or idx % 10 == 0:  # Log progress for first 10 and every 10th
-                            self.logger.debug(f"Added URL #{len(unique_urls)}: {url[:50]}...")
-                    
-                except Exception as e:
-                    self.logger.debug(f"Error extracting URL from listing {idx}: {e}")
-                    continue
-            
+
+            while True:
+                new_urls = self._extract_listing_urls_from_dom(seen_urls)
+                if new_urls:
+                    unique_urls.extend(new_urls)
+                    stagnant_attempts = 0
+                    self.logger.info(
+                        "Collected %s unique listing URLs so far",
+                        len(unique_urls),
+                    )
+                else:
+                    stagnant_attempts += 1
+
+                if target_count and len(unique_urls) >= target_count:
+                    unique_urls = unique_urls[:target_count]
+                    break
+
+                if stagnant_attempts >= max_attempts:
+                    break
+
+                if not self._scroll_results_feed():
+                    break
+
+                self.page.wait_for_timeout(scroll_interval)
+
+            final_urls = self._extract_listing_urls_from_dom(seen_urls)
+            if final_urls:
+                unique_urls.extend(final_urls)
+                if target_count:
+                    unique_urls = unique_urls[:target_count]
+
             self.logger.info(f"Collected {len(unique_urls)} unique URLs")
             return unique_urls
             
         except Exception as e:
             self.logger.error(f"Failed to collect listing URLs: {e}")
             return unique_urls
+
+    def _extract_listing_urls_from_dom(self, seen_place_ids: Set[str]) -> List[str]:
+        """Extract unseen listing URLs from the currently rendered result cards."""
+        new_urls: List[str] = []
+        listings = self.page.locator(self.selectors.SEARCH_RESULTS)
+        listing_count = listings.count()
+        self.logger.debug("Inspecting %s rendered listing anchors", listing_count)
+
+        for idx in range(listing_count):
+            try:
+                url = listings.nth(idx).get_attribute('href', timeout=1000)
+                if not url:
+                    continue
+
+                place_id = extract_place_id(url)
+                if not place_id or place_id in seen_place_ids:
+                    continue
+
+                seen_place_ids.add(place_id)
+                new_urls.append(url)
+
+                if idx < 10 or idx % 25 == 0:
+                    self.logger.debug(f"Added URL #{len(new_urls)} from DOM: {url[:80]}...")
+            except Exception as e:
+                self.logger.debug(f"Error extracting URL from listing {idx}: {e}")
+
+        return new_urls
     
     def navigate_to_business(self, url: str, timeout: int = 30000) -> bool:
         """Navigate to a specific business listing.
@@ -328,6 +367,16 @@ class PageNavigator:
         try:
             self.logger.debug(f"Navigating to business: {url[:50]}...")
             self.page.goto(url, timeout=timeout)
+
+            if self.settings.browser.handle_cookie_banner and not self._cookie_banner_handled:
+                try:
+                    if self.handle_cookie_banner(self.settings.browser.cookie_preference):
+                        self._cookie_banner_handled = True
+                        self._persist_session_state()
+                    else:
+                        self._cookie_banner_handled = True
+                except Exception as exc:
+                    self.logger.debug(f"Cookie handling on business navigation failed: {exc}")
             
             # Wait for business details to load
             return self._wait_for_business_details()
@@ -638,6 +687,46 @@ class PageNavigator:
         except Exception as e:
             self.logger.error(f"Error handling cookie banner: {e}")
             return False
+
+    def _persist_session_state(self) -> None:
+        if self._persist_session_state_callback is None:
+            return
+
+        try:
+            self._persist_session_state_callback()
+        except Exception as exc:
+            self.logger.debug(f"Failed to persist browser session state: {exc}")
+
+    def _find_search_input(self):
+        for selector in self.selectors.SEARCH_INPUT_SELECTORS:
+            try:
+                locator = self.page.locator(selector)
+                if locator.count() <= 0:
+                    continue
+                first_elem = locator.first
+                if first_elem.is_visible() and first_elem.is_enabled():
+                    self.logger.info(f"Found search input with selector: {selector}")
+                    return first_elem
+                self.logger.debug(f"Search input found but not visible/enabled: {selector}")
+            except Exception as e:
+                self.logger.debug(f"Failed to locate search input with selector '{selector}': {e}")
+        return None
+
+    def _has_visible_cookie_buttons(self) -> bool:
+        selectors = (
+            self.selectors.REJECT_ALL_BUTTON_SELECTORS
+            + self.selectors.ACCEPT_ALL_BUTTON_SELECTORS
+        )
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                if locator.count() > 0 and locator.first.is_visible():
+                    return True
+            except Exception as exc:
+                self.logger.debug(
+                    f"Failed to inspect cookie button selector '{selector}': {exc}"
+                )
+        return False
     
     def is_on_consent_page(self) -> bool:
         """Check if we're on Google's consent page.
@@ -743,6 +832,23 @@ class PageNavigator:
             # Give it a basic wait as fallback
             self.page.wait_for_timeout(3000)
             return False
+
+    def has_limited_view(self) -> bool:
+        try:
+            body_text = self.page.locator("body").inner_text(
+                timeout=self.settings.browser.timeout_short
+            ).lower()
+        except Exception as exc:
+            self.logger.debug(f"Could not read page text for limited-view check: {exc}")
+            return False
+
+        limited_view_markers = [
+            "die ansicht ist beschränkt",
+            "ansicht ist beschränkt",
+            "view is limited",
+            "only a portion of google maps data",
+        ]
+        return any(marker in body_text for marker in limited_view_markers)
     
     def save_debug_screenshot(self, step_name: str, grid_cell_id: str = "unknown") -> str:
         """Save a debug screenshot with timestamp.
